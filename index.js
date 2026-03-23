@@ -1,4 +1,8 @@
 const https = require("https");
+const crypto = require("crypto");
+
+const BYBIT_KEY    = process.env.BYBIT_KEY;
+const BYBIT_SECRET = process.env.BYBIT_SECRET;
 
 const server = require("http").createServer((req, res) => {
   if (req.url !== "/bybit") {
@@ -6,13 +10,21 @@ const server = require("http").createServer((req, res) => {
     return res.end("Not found");
   }
 
+  const ts        = Date.now().toString();
+  const recvWindow = "5000";
+  const paramStr  = ts + BYBIT_KEY + recvWindow;
+  const signature = crypto.createHmac("sha256", BYBIT_SECRET).update(paramStr).digest("hex");
+
   const options = {
     hostname: "api.bybit.com",
     path: "/v5/asset/coin/query-info",
     method: "GET",
     headers: {
-      "Accept": "application/json",
-      "User-Agent": "Mozilla/5.0"
+      "X-BAPI-API-KEY":     BYBIT_KEY,
+      "X-BAPI-TIMESTAMP":   ts,
+      "X-BAPI-SIGN":        signature,
+      "X-BAPI-RECV-WINDOW": recvWindow,
+      "Accept":             "application/json"
     }
   };
 
@@ -34,4 +46,4 @@ const server = require("http").createServer((req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log("Proxy running on port " + PORT));
+server.listen(PORT, () => console.log("Bybit proxy running on port " + PORT));
