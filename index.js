@@ -5,6 +5,8 @@ const BYBIT_KEY      = process.env.BYBIT_KEY;
 const BYBIT_SECRET   = process.env.BYBIT_SECRET;
 const BINANCE_KEY    = process.env.BINANCE_KEY;
 const BINANCE_SECRET = process.env.BINANCE_SECRET;
+const KRAKEN_KEY     = process.env.KRAKEN_KEY;
+const KRAKEN_SECRET  = process.env.KRAKEN_SECRET;
 
 const server = require("http").createServer((req, res) => {
 
@@ -66,6 +68,43 @@ const server = require("http").createServer((req, res) => {
       });
     });
     proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    proxy.end();
+    return;
+  }
+
+  // ── KRAKEN ─────────────────────────────────────────────────────
+  if (req.url === "/kraken") {
+    const path    = "/0/private/DepositMethods";
+    const nonce   = Date.now().toString();
+    const postData = "nonce=" + nonce;
+
+    // Kraken signature: SHA256(nonce + postData) then HMAC-SHA512 with base64-decoded secret
+    const secret     = Buffer.from(KRAKEN_SECRET, "base64");
+    const hash       = crypto.createHash("sha256").update(nonce + postData).digest();
+    const hmac       = crypto.createHmac("sha512", secret).update(Buffer.concat([Buffer.from(path), hash])).digest("base64");
+
+    const options = {
+      hostname: "api.kraken.com",
+      path,
+      method: "POST",
+      headers: {
+        "API-Key":      KRAKEN_KEY,
+        "API-Sign":     hmac,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData)
+      }
+    };
+
+    const proxy = https.request(options, krakenRes => {
+      let data = "";
+      krakenRes.on("data", chunk => data += chunk);
+      krakenRes.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(data);
+      });
+    });
+    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    proxy.write(postData);
     proxy.end();
     return;
   }
