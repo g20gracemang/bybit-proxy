@@ -115,39 +115,41 @@ const server = require("http").createServer((req, res) => {
   }
 
   // ── KRAKEN (per-chain, authenticated) ──────────────────────────
-  if (req.url.startsWith("/kraken")) {
-    const url     = new URL("https://dummy.com" + req.url);
-    const tickers = (url.searchParams.get("tickers") || "").split(",").filter(Boolean);
+  if (req.url === "/kraken") {
+    let body = "";
+    req.on("data", chunk => body += chunk);
+    req.on("end", () => {
+      const tickers = (body || "").split(",").filter(Boolean);
 
-    if (!tickers.length) {
-      res.writeHead(400);
-      res.end(JSON.stringify({ error: "No tickers provided" }));
-      return;
-    }
+      if (!tickers.length) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "No tickers provided" }));
+        return;
+      }
 
-    // Run all ticker calls in parallel with 200ms stagger
-    const promises = tickers.map((coin, i) =>
-      new Promise(resolve => setTimeout(() => {
-        krakenPost("/0/private/DepositMethods", "asset=" + coin)
-          .then(data => {
-            const methods = (data.result || []).map(m => ({
-              coin,
-              network:       m.method,
-              depositEnable: true
-            }));
-            resolve(methods);
-          })
-          .catch(() => resolve([]));
-      }, i * 100))
-    );
+      const promises = tickers.map((coin, i) =>
+        new Promise(resolve => setTimeout(() => {
+          krakenPost("/0/private/DepositMethods", "asset=" + coin.trim())
+            .then(data => {
+              const methods = (data.result || []).map(m => ({
+                coin:          coin.trim(),
+                network:       m.method,
+                depositEnable: true
+              }));
+              resolve(methods);
+            })
+            .catch(() => resolve([]));
+        }, i * 100))
+      );
 
-    Promise.all(promises).then(arrays => {
-      const results = arrays.flat();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(results));
-    }).catch(e => {
-      res.writeHead(500);
-      res.end(JSON.stringify({ error: e.message }));
+      Promise.all(promises).then(arrays => {
+        const results = arrays.flat();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(results));
+      }).catch(e => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: e.message }));
+      });
     });
     return;
   }
