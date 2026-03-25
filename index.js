@@ -5,6 +5,50 @@ const BYBIT_KEY      = process.env.BYBIT_KEY;
 const BYBIT_SECRET   = process.env.BYBIT_SECRET;
 const BINANCE_KEY    = process.env.BINANCE_KEY;
 const BINANCE_SECRET = process.env.BINANCE_SECRET;
+const KRAKEN_KEY     = process.env.KRAKEN_KEY;
+const KRAKEN_SECRET  = process.env.KRAKEN_SECRET;
+
+// ── KRAKEN SIGNATURE HELPER ────────────────────────────────────
+function krakenSign(path, nonce, postData) {
+  const secret = Buffer.from(KRAKEN_SECRET, "base64");
+  const hash   = crypto.createHash("sha256").update(nonce + postData).digest();
+  return crypto.createHmac("sha512", secret)
+    .update(Buffer.concat([Buffer.from(path), hash]))
+    .digest("base64");
+}
+
+// ── KRAKEN API CALL (returns a Promise) ────────────────────────
+function krakenPost(path, params) {
+  return new Promise((resolve, reject) => {
+    const nonce    = Date.now().toString();
+    const postData = "nonce=" + nonce + (params ? "&" + params : "");
+    const sign     = krakenSign(path, nonce, postData);
+
+    const options = {
+      hostname: "api.kraken.com",
+      path,
+      method: "POST",
+      headers: {
+        "API-Key":        KRAKEN_KEY,
+        "API-Sign":       sign,
+        "Content-Type":   "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData)
+      }
+    };
+
+    const req = https.request(options, res2 => {
+      let data = "";
+      res2.on("data", chunk => data += chunk);
+      res2.on("end", () => {
+        try { resolve(JSON.parse(data)); }
+        catch(e) { reject(e); }
+      });
+    });
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
+  });
+}
 
 const server = require("http").createServer((req, res) => {
 
@@ -70,37 +114,47 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
-  // ── KRAKEN (public endpoint — no API key needed) ────────────────
-  if (req.url === "/kraken") {
-    const options = {
-      hostname: "api.kraken.com",
-      path: "/0/public/Assets",
-      method: "GET",
-      headers: { "Accept": "application/json" }
+  // ── KRAKEN (per-chain, authenticated) ──────────────────────────
+  if (req.url.startsWith("/kraken")) {
+    // Tickers passed as ?tickers=BTC,ETH,SOL,...
+    const url      = new URL("https://dummy.com" + req.url);
+    const tickers  = (url.searchParams.get("tickers") || "").split(",").filter(Boolean);
+
+    if (!tickers.length) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "No tickers provided" }));
+      return;
+    }
+
+    const results = [];
+    // Process tickers sequentially with 200ms delay to avoid rate limits
+    const processNext = (i) => {
+      if (i >= tickers.length) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(results));
+        return;
+      }
+      const coin = tickers[i];
+      // Small delay between calls
+      setTimeout(() => {
+        krakenPost("/0/private/DepositMethods", "asset=" + coin)
+          .then(data => {
+            const methods = data.result || [];
+            methods.forEach(m => {
+              results.push({
+                coin,
+                network:       m.method,
+                depositEnable: !m["gen-address"] === false ? true : m.enabled !== false,
+                withdrawEnable: true // DepositMethods doesn't give WD status; use WithdrawMethods separately
+              });
+            });
+          })
+          .catch(() => {}) // skip failed coins silently
+          .finally(() => processNext(i + 1));
+      }, 200);
     };
 
-    const proxy = https.request(options, krakenRes => {
-      let data = "";
-      krakenRes.on("data", chunk => data += chunk);
-      krakenRes.on("end", () => {
-        try {
-          const parsed = JSON.parse(data);
-          const assets = parsed.result || {};
-          const output = Object.entries(assets).map(([id, info]) => ({
-            id,
-            altname: info.altname,
-            status:  info.status
-          }));
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(output));
-        } catch(e) {
-          res.writeHead(500);
-          res.end(JSON.stringify({ error: e.message }));
-        }
-      });
-    });
-    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
-    proxy.end();
+    processNext(0);
     return;
   }
 
