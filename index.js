@@ -5,8 +5,6 @@ const BYBIT_KEY      = process.env.BYBIT_KEY;
 const BYBIT_SECRET   = process.env.BYBIT_SECRET;
 const BINANCE_KEY    = process.env.BINANCE_KEY;
 const BINANCE_SECRET = process.env.BINANCE_SECRET;
-const KRAKEN_KEY     = process.env.KRAKEN_KEY;
-const KRAKEN_SECRET  = process.env.KRAKEN_SECRET;
 
 const server = require("http").createServer((req, res) => {
 
@@ -72,29 +70,14 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
-  // ── KRAKEN ─────────────────────────────────────────────────────
-  // Uses private /0/private/AssetPairs-adjacent: fetches all assets via
-  // public endpoint, then withdrawal status via private WithdrawInfo bulk
+  // ── KRAKEN (public endpoint — no API key needed) ───────────────
   if (req.url === "/kraken") {
-    const path     = "/0/private/WithdrawAddresses";
-    const nonce    = Date.now().toString();
-    const postData = "nonce=" + nonce;
-
-    const secret = Buffer.from(KRAKEN_SECRET, "base64");
-    const hash   = crypto.createHash("sha256").update(nonce + postData).digest();
-    const hmac   = crypto.createHmac("sha512", secret)
-                     .update(Buffer.concat([Buffer.from(path), hash]))
-                     .digest("base64");
-
-    // Step 1: fetch public asset list (no auth needed)
-    const pubOptions = {
+    const options = {
       hostname: "api.kraken.com",
       path: "/0/public/Assets",
       method: "GET",
       headers: { "Accept": "application/json" }
     };
-
-    const pubReq = https.request(pubOptions, pubRes => {
       let pubData = "";
       pubRes.on("data", chunk => pubData += chunk);
       pubRes.on("end", () => {
