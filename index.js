@@ -70,6 +70,40 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
+  // ── KRAKEN (public endpoint — no API key needed) ────────────────
+  if (req.url === "/kraken") {
+    const options = {
+      hostname: "api.kraken.com",
+      path: "/0/public/Assets",
+      method: "GET",
+      headers: { "Accept": "application/json" }
+    };
+
+    const proxy = https.request(options, krakenRes => {
+      let data = "";
+      krakenRes.on("data", chunk => data += chunk);
+      krakenRes.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          const assets = parsed.result || {};
+          const output = Object.entries(assets).map(([id, info]) => ({
+            id,
+            altname: info.altname,
+            status:  info.status
+          }));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(output));
+        } catch(e) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+    });
+    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    proxy.end();
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 });
