@@ -70,7 +70,7 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
-  // ── KRAKEN (public endpoint — no API key needed) ───────────────
+  // ── KRAKEN (public endpoint — no API key needed) ────────────────
   if (req.url === "/kraken") {
     const options = {
       hostname: "api.kraken.com",
@@ -78,18 +78,18 @@ const server = require("http").createServer((req, res) => {
       method: "GET",
       headers: { "Accept": "application/json" }
     };
-      let pubData = "";
-      pubRes.on("data", chunk => pubData += chunk);
-      pubRes.on("end", () => {
+
+    const proxy = https.request(options, krakenRes => {
+      let data = "";
+      krakenRes.on("data", chunk => data += chunk);
+      krakenRes.on("end", () => {
         try {
-          const parsed = JSON.parse(pubData);
-          // Return asset list with status flags
-          // Kraken public assets include status field: enabled/deposit_only/withdrawal_only/funding_temporarily_disabled
+          const parsed = JSON.parse(data);
           const assets = parsed.result || {};
           const output = Object.entries(assets).map(([id, info]) => ({
             id,
-            altname:  info.altname,
-            status:   info.status  // "enabled" | "deposit_only" | "withdrawal_only" | "funding_temporarily_disabled"
+            altname: info.altname,
+            status:  info.status
           }));
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(output));
@@ -99,8 +99,8 @@ const server = require("http").createServer((req, res) => {
         }
       });
     });
-    pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
-    pubReq.end();
+    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    proxy.end();
     return;
   }
 
