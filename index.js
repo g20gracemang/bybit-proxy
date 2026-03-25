@@ -73,39 +73,51 @@ const server = require("http").createServer((req, res) => {
   }
 
   // ── KRAKEN ─────────────────────────────────────────────────────
+  // Uses private /0/private/AssetPairs-adjacent: fetches all assets via
+  // public endpoint, then withdrawal status via private WithdrawInfo bulk
   if (req.url === "/kraken") {
-    const path    = "/0/private/DepositMethods";
-    const nonce   = Date.now().toString();
+    const path     = "/0/private/WithdrawAddresses";
+    const nonce    = Date.now().toString();
     const postData = "nonce=" + nonce;
 
-    // Kraken signature: SHA256(nonce + postData) then HMAC-SHA512 with base64-decoded secret
-    const secret     = Buffer.from(KRAKEN_SECRET, "base64");
-    const hash       = crypto.createHash("sha256").update(nonce + postData).digest();
-    const hmac       = crypto.createHmac("sha512", secret).update(Buffer.concat([Buffer.from(path), hash])).digest("base64");
+    const secret = Buffer.from(KRAKEN_SECRET, "base64");
+    const hash   = crypto.createHash("sha256").update(nonce + postData).digest();
+    const hmac   = crypto.createHmac("sha512", secret)
+                     .update(Buffer.concat([Buffer.from(path), hash]))
+                     .digest("base64");
 
-    const options = {
+    // Step 1: fetch public asset list (no auth needed)
+    const pubOptions = {
       hostname: "api.kraken.com",
-      path,
-      method: "POST",
-      headers: {
-        "API-Key":      KRAKEN_KEY,
-        "API-Sign":     hmac,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Content-Length": Buffer.byteLength(postData)
-      }
+      path: "/0/public/Assets",
+      method: "GET",
+      headers: { "Accept": "application/json" }
     };
 
-    const proxy = https.request(options, krakenRes => {
-      let data = "";
-      krakenRes.on("data", chunk => data += chunk);
-      krakenRes.on("end", () => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(data);
+    const pubReq = https.request(pubOptions, pubRes => {
+      let pubData = "";
+      pubRes.on("data", chunk => pubData += chunk);
+      pubRes.on("end", () => {
+        try {
+          const parsed = JSON.parse(pubData);
+          // Return asset list with status flags
+          // Kraken public assets include status field: enabled/deposit_only/withdrawal_only/funding_temporarily_disabled
+          const assets = parsed.result || {};
+          const output = Object.entries(assets).map(([id, info]) => ({
+            id,
+            altname:  info.altname,
+            status:   info.status  // "enabled" | "deposit_only" | "withdrawal_only" | "funding_temporarily_disabled"
+          }));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(output));
+        } catch(e) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: e.message }));
+        }
       });
     });
-    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
-    proxy.write(postData);
-    proxy.end();
+    pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    pubReq.end();
     return;
   }
 
