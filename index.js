@@ -116,9 +116,8 @@ const server = require("http").createServer((req, res) => {
 
   // ── KRAKEN (per-chain, authenticated) ──────────────────────────
   if (req.url.startsWith("/kraken")) {
-    // Tickers passed as ?tickers=BTC,ETH,SOL,...
-    const url      = new URL("https://dummy.com" + req.url);
-    const tickers  = (url.searchParams.get("tickers") || "").split(",").filter(Boolean);
+    const url     = new URL("https://dummy.com" + req.url);
+    const tickers = (url.searchParams.get("tickers") || "").split(",").filter(Boolean);
 
     if (!tickers.length) {
       res.writeHead(400);
@@ -126,35 +125,30 @@ const server = require("http").createServer((req, res) => {
       return;
     }
 
-    const results = [];
-    // Process tickers sequentially with 200ms delay to avoid rate limits
-    const processNext = (i) => {
-      if (i >= tickers.length) {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(results));
-        return;
-      }
-      const coin = tickers[i];
-      // Small delay between calls
-      setTimeout(() => {
+    // Run all ticker calls in parallel with 200ms stagger
+    const promises = tickers.map((coin, i) =>
+      new Promise(resolve => setTimeout(() => {
         krakenPost("/0/private/DepositMethods", "asset=" + coin)
           .then(data => {
-            const methods = data.result || [];
-            methods.forEach(m => {
-              results.push({
-                coin,
-                network:       m.method,
-                depositEnable: !m["gen-address"] === false ? true : m.enabled !== false,
-                withdrawEnable: true // DepositMethods doesn't give WD status; use WithdrawMethods separately
-              });
-            });
+            const methods = (data.result || []).map(m => ({
+              coin,
+              network:       m.method,
+              depositEnable: true
+            }));
+            resolve(methods);
           })
-          .catch(() => {}) // skip failed coins silently
-          .finally(() => processNext(i + 1));
-      }, 200);
-    };
+          .catch(() => resolve([]));
+      }, i * 100))
+    );
 
-    processNext(0);
+    Promise.all(promises).then(arrays => {
+      const results = arrays.flat();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(results));
+    }).catch(e => {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: e.message }));
+    });
     return;
   }
 
