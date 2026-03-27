@@ -106,7 +106,7 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
-  // ── KRAKEN (per-network, authenticated) ────────────────────────
+  // ── KRAKEN (hybrid: per-network deposit + public withdrawal status) ──
   if (req.url === "/kraken") {
     let body = "";
     req.on("data", chunk => body += chunk);
@@ -118,7 +118,7 @@ const server = require("http").createServer((req, res) => {
         return;
       }
 
-      // Step 1: fetch public asset list to build altname → internal ID map
+      // Step 1: fetch public assets to build altname→id map + withdrawal status
       const pubReq = https.request({
         hostname: "api.kraken.com", path: "/0/public/Assets",
         method: "GET", headers: { "Accept": "application/json" }
@@ -126,37 +126,45 @@ const server = require("http").createServer((req, res) => {
         let pubData = "";
         pubRes.on("data", c => pubData += c);
         pubRes.on("end", () => {
-          let altToId = {};
+          let altToId = {}, wdStatus = {};
           try {
-            const parsed = JSON.parse(pubData);
-            const assets = parsed.result || {};
-            // Build map: altname (uppercase) → internal id
+            const assets = JSON.parse(pubData).result || {};
             Object.entries(assets).forEach(([id, info]) => {
-              altToId[info.altname.toUpperCase()] = id;
-              altToId[id.toUpperCase()] = id; // also map id to itself
+              const alt = info.altname.toUpperCase();
+              altToId[alt] = id;
+              altToId[id.toUpperCase()] = id;
+              // withdrawal open if status is "enabled" or "withdrawal_only"
+              const wdOk = info.status === "enabled" || info.status === "withdrawal_only";
+              wdStatus[id]  = wdOk;
+              wdStatus[alt] = wdOk;
             });
           } catch(e) {}
 
-          // Step 2: for each ticker resolve internal ID then fetch dep/wd methods
+          // Step 2: fetch DepositMethods per coin for network-level deposit status
           const promises = tickers.map((coin, i) =>
             new Promise(resolve => setTimeout(() => {
               const krakenId = altToId[coin.toUpperCase()] || coin;
+              const wdOk     = wdStatus[coin.toUpperCase()] !== undefined
+                                 ? wdStatus[coin.toUpperCase()]
+                                 : true;
 
-              Promise.all([
-                krakenPost("/0/private/DepositMethods",  "asset=" + krakenId),
-                krakenPost("/0/private/WithdrawMethods", "asset=" + krakenId)
-              ]).then(([depData, wdData]) => {
-                const depMethods = (depData.result || []).map(m => m.method);
-                const wdMethods  = (wdData.result  || []).map(m => m.method);
-                const allNetworks = [...new Set([...depMethods, ...wdMethods])];
-                const rows = allNetworks.map(network => ({
-                  coin,
-                  network,
-                  depositEnable:  wdMethods.includes(network),
-                  withdrawEnable: depMethods.includes(network)
-                }));
-                resolve(rows);
-              }).catch(() => resolve([]));
+              krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
+                .then(depData => {
+                  const depMethods = (depData.result || []).map(m => m.method);
+                  if (depMethods.length === 0) {
+                    // No deposit methods = deposit suspended for all networks
+                    resolve([{ coin, network: coin, depositEnable: false, withdrawEnable: wdOk }]);
+                    return;
+                  }
+                  const rows = depMethods.map(network => ({
+                    coin,
+                    network,
+                    depositEnable:  true, // if it appears in DepositMethods, deposit is open
+                    withdrawEnable: wdOk  // from public assets status
+                  }));
+                  resolve(rows);
+                })
+                .catch(() => resolve([]));
             }, i * 150))
           );
 
