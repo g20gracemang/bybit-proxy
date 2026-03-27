@@ -118,36 +118,59 @@ const server = require("http").createServer((req, res) => {
         return;
       }
 
-      // For each coin fetch DepositMethods + WithdrawMethods in parallel
-      const promises = tickers.map((coin, i) =>
-        new Promise(resolve => setTimeout(() => {
-          Promise.all([
-            krakenPost("/0/private/DepositMethods",  "asset=" + coin),
-            krakenPost("/0/private/WithdrawMethods", "asset=" + coin)
-          ]).then(([depData, wdData]) => {
-            const depMethods = (depData.result  || []).map(m => m.method);
-            const wdMethods  = (wdData.result   || []).map(m => m.method);
+      // Step 1: fetch public asset list to build altname → internal ID map
+      const pubReq = https.request({
+        hostname: "api.kraken.com", path: "/0/public/Assets",
+        method: "GET", headers: { "Accept": "application/json" }
+      }, pubRes => {
+        let pubData = "";
+        pubRes.on("data", c => pubData += c);
+        pubRes.on("end", () => {
+          let altToId = {};
+          try {
+            const parsed = JSON.parse(pubData);
+            const assets = parsed.result || {};
+            // Build map: altname (uppercase) → internal id
+            Object.entries(assets).forEach(([id, info]) => {
+              altToId[info.altname.toUpperCase()] = id;
+              altToId[id.toUpperCase()] = id; // also map id to itself
+            });
+          } catch(e) {}
 
-            // Union of all networks from both endpoints
-            const allNetworks = [...new Set([...depMethods, ...wdMethods])];
-            const rows = allNetworks.map(network => ({
-              coin,
-              network,
-              depositEnable:  depMethods.includes(network),
-              withdrawEnable: wdMethods.includes(network)
-            }));
-            resolve(rows);
-          }).catch(() => resolve([]));
-        }, i * 150))
-      );
+          // Step 2: for each ticker resolve internal ID then fetch dep/wd methods
+          const promises = tickers.map((coin, i) =>
+            new Promise(resolve => setTimeout(() => {
+              const krakenId = altToId[coin.toUpperCase()] || coin;
 
-      Promise.all(promises).then(arrays => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(arrays.flat()));
-      }).catch(e => {
-        res.writeHead(500);
-        res.end(JSON.stringify({ error: e.message }));
+              Promise.all([
+                krakenPost("/0/private/DepositMethods",  "asset=" + krakenId),
+                krakenPost("/0/private/WithdrawMethods", "asset=" + krakenId)
+              ]).then(([depData, wdData]) => {
+                const depMethods = (depData.result || []).map(m => m.method);
+                const wdMethods  = (wdData.result  || []).map(m => m.method);
+                const allNetworks = [...new Set([...depMethods, ...wdMethods])];
+                const rows = allNetworks.map(network => ({
+                  coin,
+                  network,
+                  depositEnable:  wdMethods.includes(network),
+                  withdrawEnable: depMethods.includes(network)
+                }));
+                resolve(rows);
+              }).catch(() => resolve([]));
+            }, i * 150))
+          );
+
+          Promise.all(promises).then(arrays => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(arrays.flat()));
+          }).catch(e => {
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: e.message }));
+          });
+        });
       });
+      pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      pubReq.end();
     });
     return;
   }
