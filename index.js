@@ -151,16 +151,26 @@ const server = require("http").createServer((req, res) => {
               krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
                 .then(depData => {
                   const depMethods = (depData.result || []).map(m => m.method);
+                  const depOk = wdStatus[coin.toUpperCase()] !== undefined
+                    ? (wdStatus[coin.toUpperCase()] === true || wdStatus[altToId[coin.toUpperCase()]] === true)
+                    : true;
+
                   if (depMethods.length === 0) {
-                    // No deposit methods = deposit suspended for all networks
-                    resolve([{ coin, network: coin, depositEnable: false, withdrawEnable: wdOk }]);
+                    // Fallback: no per-network data, use coin-level status for both
+                    const coinStatus = wdStatus[coin.toUpperCase()];
+                    resolve([{
+                      coin,
+                      network: "ALL NETWORKS",
+                      depositEnable:  coinStatus !== undefined ? coinStatus : true,
+                      withdrawEnable: wdOk
+                    }]);
                     return;
                   }
                   const rows = depMethods.map(network => ({
                     coin,
                     network,
-                    depositEnable:  true, // if it appears in DepositMethods, deposit is open
-                    withdrawEnable: wdOk  // from public assets status
+                    depositEnable:  true,
+                    withdrawEnable: wdOk
                   }));
                   resolve(rows);
                 })
