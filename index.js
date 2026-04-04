@@ -109,11 +109,65 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
-  // ── COINBASE (Exchange /currencies with supported_networks) ───
+  // ── COINBASE (Exchange /currencies, network inferred from tx link) ──
   if (req.url === "/coinbase") {
-    const ts      = Math.floor(Date.now() / 1000).toString();
-    const secret  = Buffer.from(COINBASE_SECRET, "base64");
-    const sig     = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
+
+    // Infer blockchain network from Coinbase's crypto_transaction_link
+    function inferNetwork(txLink) {
+      if (!txLink) return null;
+      if (txLink.includes("etherscan.io"))          return "ETH";
+      if (txLink.includes("explorer.solana.com"))   return "SOL";
+      if (txLink.includes("explorer.cardano.org") ||
+          txLink.includes("cardanoscan.io"))         return "ADA";
+      if (txLink.includes("blockchain.com/btc") ||
+          txLink.includes("blockstream.info"))       return "BTC";
+      if (txLink.includes("tronscan.org"))           return "TRX";
+      if (txLink.includes("bscscan.com"))            return "BSC";
+      if (txLink.includes("polygonscan.com"))        return "MATIC";
+      if (txLink.includes("arbiscan.io"))            return "ARB";
+      if (txLink.includes("optimistic.etherscan") ||
+          txLink.includes("optimism.io"))            return "OP";
+      if (txLink.includes("basescan.org"))           return "BASE";
+      if (txLink.includes("explorer.avax") ||
+          txLink.includes("snowtrace.io"))           return "AVAX";
+      if (txLink.includes("ftmscan.com"))            return "FTM";
+      if (txLink.includes("nearblocks.io") ||
+          txLink.includes("explorer.near.org"))      return "NEAR";
+      if (txLink.includes("explorer.aptoslabs.com"))return "APT";
+      if (txLink.includes("suiscan.xyz") ||
+          txLink.includes("explorer.sui.io"))        return "SUI";
+      if (txLink.includes("atomscan.com") ||
+          txLink.includes("cosmos.bigdipper.live"))  return "ATOM";
+      if (txLink.includes("minascan.io") ||
+          txLink.includes("minaexplorer.com"))       return "MINA";
+      if (txLink.includes("explorer.icp") ||
+          txLink.includes("dashboard.internetcomputer.org")) return "ICP";
+      if (txLink.includes("xrpscan.com") ||
+          txLink.includes("livenet.xrpl.org"))       return "XRP";
+      if (txLink.includes("explorer.helium.com"))   return "HNT";
+      if (txLink.includes("elamainscan.io") ||
+          txLink.includes("blockchain.elastos.org"))return "ELA";
+      if (txLink.includes("zenscan.io") ||
+          txLink.includes("explorer.horizen.io"))   return "ZEN";
+      if (txLink.includes("vechainstats.com") ||
+          txLink.includes("explore.vechain.org"))   return "VET";
+      if (txLink.includes("algoexplorer.io") ||
+          txLink.includes("explorer.perawallet.app")) return "ALGO";
+      if (txLink.includes("explorer.celo.org"))     return "CELO";
+      if (txLink.includes("stellarchain.io") ||
+          txLink.includes("stellar.expert"))        return "XLM";
+      if (txLink.includes("tzstats.com") ||
+          txLink.includes("tzkt.io"))               return "XTZ";
+      if (txLink.includes("flowscan.org") ||
+          txLink.includes("flowdiver.io"))          return "FLOW";
+      if (txLink.includes("basescan.org"))          return "BASE";
+      if (txLink.includes("lineascan.build"))       return "LINEA";
+      return null;
+    }
+
+    const ts     = Math.floor(Date.now() / 1000).toString();
+    const secret = Buffer.from(COINBASE_SECRET, "base64");
+    const sig    = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
 
     const opts = {
       hostname: "api.exchange.coinbase.com",
@@ -134,50 +188,18 @@ const server = require("http").createServer((req, res) => {
       cbRes.on("end", () => {
         try {
           const currencies = JSON.parse(data);
-          const result = [];
-
-          currencies.forEach(c => {
+          const result = currencies.map(c => {
             const id      = c.id.toUpperCase();
-            const status  = c.status;
             const details = c.details || {};
-
-            // supported_networks is an array of objects with network_id, status, deposit_enabled, withdraw_enabled
-            const networks = Array.isArray(details.supported_networks)
-              ? details.supported_networks
-              : [];
-
-            if (networks.length > 0) {
-              networks.forEach(net => {
-                // Try every possible field name Coinbase might use for the network name
-                const netName = (
-                  net.network_id   ||
-                  net.id           ||
-                  net.name         ||
-                  details.default_network ||
-                  id
-                ).toUpperCase();
-
-                result.push({
-                  id:              c.id,
-                  status,
-                  network:         netName,
-                  deposit_enabled:  net.deposit_enabled !== false && net.status !== "offline",
-                  withdraw_enabled: net.withdraw_enabled !== false && net.status !== "offline"
-                });
-              });
-            } else {
-              // No per-network data — use default_network field
-              const netName = (details.default_network || id).toUpperCase();
-              result.push({
-                id:              c.id,
-                status,
-                network:         netName,
-                deposit_enabled:  status === "online",
-                withdraw_enabled: status === "online"
-              });
-            }
+            const network = inferNetwork(details.crypto_transaction_link) || id;
+            return {
+              id:              c.id,
+              status:          c.status,
+              network,
+              deposit_enabled:  c.status === "online",
+              withdraw_enabled: c.status === "online"
+            };
           });
-
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(result));
         } catch(e) {
