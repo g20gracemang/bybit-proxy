@@ -137,29 +137,41 @@ const server = require("http").createServer((req, res) => {
           const result = [];
 
           currencies.forEach(c => {
-            const id       = c.id.toUpperCase();
-            const status   = c.status;
-            const details  = c.details || {};
-            const networks = details.supported_networks || [];
+            const id      = c.id.toUpperCase();
+            const status  = c.status;
+            const details = c.details || {};
+
+            // supported_networks is an array of objects with network_id, status, deposit_enabled, withdraw_enabled
+            const networks = Array.isArray(details.supported_networks)
+              ? details.supported_networks
+              : [];
 
             if (networks.length > 0) {
-              // Emit one row per supported network
               networks.forEach(net => {
+                // Try every possible field name Coinbase might use for the network name
+                const netName = (
+                  net.network_id   ||
+                  net.id           ||
+                  net.name         ||
+                  details.default_network ||
+                  id
+                ).toUpperCase();
+
                 result.push({
-                  id:      c.id,
+                  id:              c.id,
                   status,
-                  network: (net.id || net.name || id).toUpperCase(),
-                  deposit_enabled:  net.status === "online",
-                  withdraw_enabled: net.status === "online"
+                  network:         netName,
+                  deposit_enabled:  net.deposit_enabled !== false && net.status !== "offline",
+                  withdraw_enabled: net.withdraw_enabled !== false && net.status !== "offline"
                 });
               });
             } else {
-              // Fallback: use default_network or coin id
-              const net = (details.default_network || id).toUpperCase();
+              // No per-network data — use default_network field
+              const netName = (details.default_network || id).toUpperCase();
               result.push({
-                id:      c.id,
+                id:              c.id,
                 status,
-                network: net,
+                network:         netName,
                 deposit_enabled:  status === "online",
                 withdraw_enabled: status === "online"
               });
@@ -255,6 +267,38 @@ const server = require("http").createServer((req, res) => {
       pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
       pubReq.end();
     });
+    return;
+  }
+
+  // ── COINBASE DEBUG (shows raw details for first 3 coins) ──────
+  if (req.url === "/coinbase-debug") {
+    const ts     = Math.floor(Date.now() / 1000).toString();
+    const secret = Buffer.from(COINBASE_SECRET, "base64");
+    const sig    = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
+    const opts   = {
+      hostname: "api.exchange.coinbase.com",
+      path: "/currencies", method: "GET",
+      headers: {
+        "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig,
+        "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+        "User-Agent": "sexta-tracker/1.0", "Accept": "application/json"
+      }
+    };
+    const r = https.request(opts, resp => {
+      let d = "";
+      resp.on("data", c => d += c);
+      resp.on("end", () => {
+        try {
+          const all    = JSON.parse(d);
+          // Return first 3 coins with full details intact so we can inspect structure
+          const sample = all.slice(0, 3).map(c => ({ id: c.id, status: c.status, details: c.details }));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(sample, null, 2));
+        } catch(e) { res.writeHead(500); res.end(d); }
+      });
+    });
+    r.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    r.end();
     return;
   }
 
