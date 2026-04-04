@@ -200,10 +200,12 @@ const server = require("http").createServer((req, res) => {
   if (req.url === "/coinbase") {
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const method    = "GET";
-    const path      = "/v2/assets/search?filter=listed&limit=300";
+    const path      = "/currencies";
     const body      = "";
+    // Coinbase Exchange signing: base64-decode secret first, then HMAC
+    const secret    = Buffer.from(COINBASE_SECRET, "base64");
     const message   = timestamp + method + path + body;
-    const sig       = crypto.createHmac("sha256", COINBASE_SECRET).update(message).digest("hex");
+    const sig       = crypto.createHmac("sha256", secret).update(message).digest("base64");
 
     const options = {
       hostname: "api.exchange.coinbase.com",
@@ -214,7 +216,6 @@ const server = require("http").createServer((req, res) => {
         "CB-ACCESS-SIGN":       sig,
         "CB-ACCESS-TIMESTAMP":  timestamp,
         "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
-        "CB-VERSION":           "2016-02-18",
         "User-Agent":           "sexta-tracker/1.0",
         "Accept":               "application/json"
       }
