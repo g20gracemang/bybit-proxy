@@ -163,6 +163,51 @@ const server = require("http").createServer((req, res) => {
           txLink.includes("flowdiver.io"))          return "FLOW";
       if (txLink.includes("basescan.org"))          return "BASE";
       if (txLink.includes("lineascan.build"))       return "LINEA";
+      if (txLink.includes("snowscan.xyz") ||
+          txLink.includes("snowtrace.io") ||
+          txLink.includes("cchain.explorer.avax"))  return "AVAX";
+      if (txLink.includes("blastscan.io"))          return "BLAST";
+      if (txLink.includes("tonscan.org"))           return "TON";
+      if (txLink.includes("explorer.sui.io") ||
+          txLink.includes("suiscan.xyz"))           return "SUI";
+      if (txLink.includes("taostats.io"))           return "TAO";
+      if (txLink.includes("sonicscan.org"))         return "SONIC";
+      if (txLink.includes("monadexplorer.com"))     return "MONAD";
+      if (txLink.includes("explorer.zksync.io"))   return "ZKSYNC";
+      if (txLink.includes("polygonscan.com"))       return "MATIC";
+      if (txLink.includes("hashscan.io"))           return "HBAR";
+      if (txLink.includes("minaexplorer.com"))      return "MINA";
+      if (txLink.includes("tonscan.org"))           return "TON";
+      if (txLink.includes("assethub-polkadot") ||
+          txLink.includes("assethub-kusama"))       return "DOT";
+      if (txLink.includes("explore.vechain.org"))  return "VET";
+      if (txLink.includes("explorer.near.org") ||
+          txLink.includes("wallet.near.org"))       return "NEAR";
+      if (txLink.includes("bithomp.com"))           return "XRP";
+      if (txLink.includes("stellar.expert"))        return "XLM";
+      if (txLink.includes("tzstats.com"))           return "XTZ";
+      if (txLink.includes("flowscan.org"))          return "FLOW";
+      if (txLink.includes("mintscan.io"))           return "COSMOS";
+      if (txLink.includes("filfox.info"))           return "FIL";
+      if (txLink.includes("explorer.stacks.co"))   return "STX";
+      if (txLink.includes("scan.coredao.org"))      return "CORE";
+      if (txLink.includes("axelarscan.io"))         return "AXL";
+      if (txLink.includes("oasisscan.com"))         return "ROSE";
+      if (txLink.includes("hyperscan.com"))         return "HYPE";
+      if (txLink.includes("routescan.io"))          return "BERA";
+      if (txLink.includes("dogechain.info"))        return "DOGE";
+      if (txLink.includes("live.blockcypher.com/btc") ||
+          txLink.includes("blockstream.info"))      return "BTC";
+      if (txLink.includes("live.blockcypher.com/ltc")) return "LTC";
+      if (txLink.includes("blockchair.com/bitcoin-cash")) return "BCH";
+      if (txLink.includes("algoexplorer.io"))       return "ALGO";
+      if (txLink.includes("explorer.celo.org"))     return "CELO";
+      if (txLink.includes("explorer.aptoslabs.com")) return "APT";
+      if (txLink.includes("explorer.provable.com")) return "ALEO";
+      if (txLink.includes("explorer.elrond.com"))  return "EGLD";
+      if (txLink.includes("flare-explorer.flare")) return "FLR";
+      if (txLink.includes("arbiscan.io"))           return "ARB";
+      if (txLink.includes("optimistic.etherscan")) return "OP";
       return null;
     }
 
