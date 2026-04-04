@@ -292,12 +292,15 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
-  // ── COINBASE DEBUG (shows raw details for first 3 coins) ──────
-  if (req.url === "/coinbase-debug") {
-    const ts     = Math.floor(Date.now() / 1000).toString();
-    const secret = Buffer.from(COINBASE_SECRET, "base64");
-    const sig    = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
-    const opts   = {
+  // ── COINBASE DEBUG (search by coin id via ?coins=CHECK,UP) ────
+  if (req.url.startsWith("/coinbase-debug")) {
+    const qs      = req.url.includes("?") ? req.url.split("?")[1] : "";
+    const param   = new URLSearchParams(qs).get("coins");
+    const filter  = param ? param.toUpperCase().split(",").map(s => s.trim()) : [];
+    const ts      = Math.floor(Date.now() / 1000).toString();
+    const secret  = Buffer.from(COINBASE_SECRET, "base64");
+    const sig     = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
+    const opts    = {
       hostname: "api.exchange.coinbase.com",
       path: "/currencies", method: "GET",
       headers: {
@@ -312,8 +315,9 @@ const server = require("http").createServer((req, res) => {
       resp.on("end", () => {
         try {
           const all    = JSON.parse(d);
-          // Return first 3 coins with full details intact so we can inspect structure
-          const sample = all.slice(0, 3).map(c => ({ id: c.id, status: c.status, details: c.details }));
+          const sample = all
+            .filter(c => filter.length === 0 || filter.includes(c.id.toUpperCase()))
+            .map(c => ({ id: c.id, status: c.status, details: c.details }));
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(sample, null, 2));
         } catch(e) { res.writeHead(500); res.end(d); }
