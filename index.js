@@ -1,15 +1,15 @@
 const https  = require("https");
 const crypto = require("crypto");
 
-const BYBIT_KEY          = process.env.BYBIT_KEY;
-const BYBIT_SECRET       = process.env.BYBIT_SECRET;
-const BINANCE_KEY        = process.env.BINANCE_KEY;
-const BINANCE_SECRET     = process.env.BINANCE_SECRET;
-const COINBASE_KEY       = process.env.COINBASE_KEY;
-const COINBASE_SECRET    = process.env.COINBASE_SECRET;
+const BYBIT_KEY           = process.env.BYBIT_KEY;
+const BYBIT_SECRET        = process.env.BYBIT_SECRET;
+const BINANCE_KEY         = process.env.BINANCE_KEY;
+const BINANCE_SECRET      = process.env.BINANCE_SECRET;
+const COINBASE_KEY        = process.env.COINBASE_KEY;
+const COINBASE_SECRET     = process.env.COINBASE_SECRET;
 const COINBASE_PASSPHRASE = process.env.COINBASE_PASSPHRASE;
-const KRAKEN_KEY     = process.env.KRAKEN_KEY;
-const KRAKEN_SECRET  = process.env.KRAKEN_SECRET;
+const KRAKEN_KEY          = process.env.KRAKEN_KEY;
+const KRAKEN_SECRET       = process.env.KRAKEN_SECRET;
 
 // ── KRAKEN SIGNATURE ───────────────────────────────────────────
 function krakenSign(path, nonce, postData) {
@@ -109,6 +109,43 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
+  // ── COINBASE EXCHANGE (crypto currencies with network info) ────
+  if (req.url === "/coinbase") {
+    const timestamp   = Math.floor(Date.now() / 1000).toString();
+    const method      = "GET";
+    const path        = "/currencies/crypto";
+    const body        = "";
+    const secret      = Buffer.from(COINBASE_SECRET, "base64");
+    const message     = timestamp + method + path + body;
+    const sig         = crypto.createHmac("sha256", secret).update(message).digest("base64");
+
+    const options = {
+      hostname: "api.exchange.coinbase.com",
+      path,
+      method,
+      headers: {
+        "CB-ACCESS-KEY":        COINBASE_KEY,
+        "CB-ACCESS-SIGN":       sig,
+        "CB-ACCESS-TIMESTAMP":  timestamp,
+        "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+        "User-Agent":           "sexta-tracker/1.0",
+        "Accept":               "application/json"
+      }
+    };
+
+    const proxy = https.request(options, cbRes => {
+      let data = "";
+      cbRes.on("data", chunk => data += chunk);
+      cbRes.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(data);
+      });
+    });
+    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    proxy.end();
+    return;
+  }
+
   // ── KRAKEN (hybrid: per-network deposit + public withdrawal status) ──
   if (req.url === "/kraken") {
     let body = "";
@@ -121,7 +158,6 @@ const server = require("http").createServer((req, res) => {
         return;
       }
 
-      // Step 1: fetch public assets to build altname→id map + withdrawal status
       const pubReq = https.request({
         hostname: "api.kraken.com", path: "/0/public/Assets",
         method: "GET", headers: { "Accept": "application/json" }
@@ -136,14 +172,12 @@ const server = require("http").createServer((req, res) => {
               const alt = info.altname.toUpperCase();
               altToId[alt] = id;
               altToId[id.toUpperCase()] = id;
-              // withdrawal open if status is "enabled" or "withdrawal_only"
               const wdOk = info.status === "enabled" || info.status === "withdrawal_only";
               wdStatus[id]  = wdOk;
               wdStatus[alt] = wdOk;
             });
           } catch(e) {}
 
-          // Step 2: fetch DepositMethods per coin for network-level deposit status
           const promises = tickers.map((coin, i) =>
             new Promise(resolve => setTimeout(() => {
               const krakenId = altToId[coin.toUpperCase()] || coin;
@@ -154,12 +188,7 @@ const server = require("http").createServer((req, res) => {
               krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
                 .then(depData => {
                   const depMethods = (depData.result || []).map(m => m.method);
-                  const depOk = wdStatus[coin.toUpperCase()] !== undefined
-                    ? (wdStatus[coin.toUpperCase()] === true || wdStatus[altToId[coin.toUpperCase()]] === true)
-                    : true;
-
                   if (depMethods.length === 0) {
-                    // Fallback: no per-network data, use coin-level status for both
                     const coinStatus = wdStatus[coin.toUpperCase()];
                     resolve([{
                       coin,
@@ -193,44 +222,6 @@ const server = require("http").createServer((req, res) => {
       pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
       pubReq.end();
     });
-    return;
-  }
-
-  // ── COINBASE EXCHANGE (HMAC SHA256) ────────────────────────────
-  if (req.url === "/coinbase") {
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const method    = "GET";
-    const path      = "/currencies";
-    const body      = "";
-    // Coinbase Exchange signing: base64-decode secret first, then HMAC
-    const secret    = Buffer.from(COINBASE_SECRET, "base64");
-    const message   = timestamp + method + path + body;
-    const sig       = crypto.createHmac("sha256", secret).update(message).digest("base64");
-
-    const options = {
-      hostname: "api.exchange.coinbase.com",
-      path,
-      method,
-      headers: {
-        "CB-ACCESS-KEY":        COINBASE_KEY,
-        "CB-ACCESS-SIGN":       sig,
-        "CB-ACCESS-TIMESTAMP":  timestamp,
-        "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
-        "User-Agent":           "sexta-tracker/1.0",
-        "Accept":               "application/json"
-      }
-    };
-
-    const proxy = https.request(options, cbRes => {
-      let data = "";
-      cbRes.on("data", chunk => data += chunk);
-      cbRes.on("end", () => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(data);
-      });
-    });
-    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
-    proxy.end();
     return;
   }
 
