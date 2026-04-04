@@ -109,11 +109,11 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
-  // ── COINBASE EXCHANGE (crypto currencies with network info) ────
+  // ── COINBASE EXCHANGE (all currencies) ────────────────────────
   if (req.url === "/coinbase") {
     const timestamp   = Math.floor(Date.now() / 1000).toString();
     const method      = "GET";
-    const path        = "/currencies/crypto";
+    const path        = "/currencies";
     const body        = "";
     const secret      = Buffer.from(COINBASE_SECRET, "base64");
     const message     = timestamp + method + path + body;
