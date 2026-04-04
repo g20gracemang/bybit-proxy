@@ -1,10 +1,13 @@
 const https  = require("https");
 const crypto = require("crypto");
 
-const BYBIT_KEY      = process.env.BYBIT_KEY;
-const BYBIT_SECRET   = process.env.BYBIT_SECRET;
-const BINANCE_KEY    = process.env.BINANCE_KEY;
-const BINANCE_SECRET = process.env.BINANCE_SECRET;
+const BYBIT_KEY          = process.env.BYBIT_KEY;
+const BYBIT_SECRET       = process.env.BYBIT_SECRET;
+const BINANCE_KEY        = process.env.BINANCE_KEY;
+const BINANCE_SECRET     = process.env.BINANCE_SECRET;
+const COINBASE_KEY       = process.env.COINBASE_KEY;
+const COINBASE_SECRET    = process.env.COINBASE_SECRET;
+const COINBASE_PASSPHRASE = process.env.COINBASE_PASSPHRASE;
 const KRAKEN_KEY     = process.env.KRAKEN_KEY;
 const KRAKEN_SECRET  = process.env.KRAKEN_SECRET;
 
@@ -190,6 +193,42 @@ const server = require("http").createServer((req, res) => {
       pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
       pubReq.end();
     });
+    return;
+  }
+
+  // ── COINBASE (legacy API key + secret + passphrase) ────────────
+  if (req.url === "/coinbase") {
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const method    = "GET";
+    const path      = "/v2/currencies/crypto";
+    const body      = "";
+    const message   = timestamp + method + path + body;
+    const sig       = crypto.createHmac("sha256", COINBASE_SECRET).update(message).digest("hex");
+
+    const options = {
+      hostname: "api.coinbase.com",
+      path,
+      method,
+      headers: {
+        "CB-ACCESS-KEY":        COINBASE_KEY,
+        "CB-ACCESS-SIGN":       sig,
+        "CB-ACCESS-TIMESTAMP":  timestamp,
+        "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+        "CB-VERSION":           "2016-02-18",
+        "Accept":               "application/json"
+      }
+    };
+
+    const proxy = https.request(options, cbRes => {
+      let data = "";
+      cbRes.on("data", chunk => data += chunk);
+      cbRes.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(data);
+      });
+    });
+    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    proxy.end();
     return;
   }
 
