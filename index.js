@@ -127,7 +127,8 @@ const server = require("http").createServer((req, res) => {
       if (txLink.includes("arbiscan.io"))            return "ARB";
       if (txLink.includes("optimistic.etherscan") ||
           txLink.includes("optimism.io"))            return "OP";
-      if (txLink.includes("basescan.org"))           return "BASE";
+      if (txLink.includes("basescan.org") ||
+          txLink.includes("basescan.io"))            return "BASE";
       if (txLink.includes("explorer.avax") ||
           txLink.includes("snowtrace.io"))           return "AVAX";
       if (txLink.includes("ftmscan.com"))            return "FTM";
