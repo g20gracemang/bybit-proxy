@@ -109,36 +109,69 @@ const server = require("http").createServer((req, res) => {
     return;
   }
 
-  // ── COINBASE EXCHANGE (all currencies) ────────────────────────
+  // ── COINBASE (Exchange /currencies with supported_networks) ───
   if (req.url === "/coinbase") {
-    const timestamp   = Math.floor(Date.now() / 1000).toString();
-    const method      = "GET";
-    const path        = "/currencies";
-    const body        = "";
-    const secret      = Buffer.from(COINBASE_SECRET, "base64");
-    const message     = timestamp + method + path + body;
-    const sig         = crypto.createHmac("sha256", secret).update(message).digest("base64");
+    const ts      = Math.floor(Date.now() / 1000).toString();
+    const secret  = Buffer.from(COINBASE_SECRET, "base64");
+    const sig     = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
 
-    const options = {
+    const opts = {
       hostname: "api.exchange.coinbase.com",
-      path,
-      method,
+      path: "/currencies", method: "GET",
       headers: {
         "CB-ACCESS-KEY":        COINBASE_KEY,
         "CB-ACCESS-SIGN":       sig,
-        "CB-ACCESS-TIMESTAMP":  timestamp,
+        "CB-ACCESS-TIMESTAMP":  ts,
         "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
-        "User-Agent":           "sexta-tracker/1.0",
-        "Accept":               "application/json"
+        "User-Agent": "sexta-tracker/1.0",
+        "Accept": "application/json"
       }
     };
 
-    const proxy = https.request(options, cbRes => {
+    const proxy = https.request(opts, cbRes => {
       let data = "";
-      cbRes.on("data", chunk => data += chunk);
+      cbRes.on("data", c => data += c);
       cbRes.on("end", () => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(data);
+        try {
+          const currencies = JSON.parse(data);
+          const result = [];
+
+          currencies.forEach(c => {
+            const id       = c.id.toUpperCase();
+            const status   = c.status;
+            const details  = c.details || {};
+            const networks = details.supported_networks || [];
+
+            if (networks.length > 0) {
+              // Emit one row per supported network
+              networks.forEach(net => {
+                result.push({
+                  id:      c.id,
+                  status,
+                  network: (net.id || net.name || id).toUpperCase(),
+                  deposit_enabled:  net.status === "online",
+                  withdraw_enabled: net.status === "online"
+                });
+              });
+            } else {
+              // Fallback: use default_network or coin id
+              const net = (details.default_network || id).toUpperCase();
+              result.push({
+                id:      c.id,
+                status,
+                network: net,
+                deposit_enabled:  status === "online",
+                withdraw_enabled: status === "online"
+              });
+            }
+          });
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch(e) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: e.message }));
+        }
       });
     });
     proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
