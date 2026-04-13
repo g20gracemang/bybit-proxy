@@ -3,8 +3,9 @@
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
 // ─────────────────────────────────────────────────────────────
-const http    = require("http");
-const crypto  = require("crypto");
+const https  = require("https");
+const http   = require("http");
+const crypto = require("crypto");
 
 const BYBIT_KEY           = process.env.BYBIT_KEY;
 const BYBIT_SECRET        = process.env.BYBIT_SECRET;
@@ -18,11 +19,9 @@ const KRAKEN_SECRET       = process.env.KRAKEN_SECRET;
 const TELEGRAM_BOT_TOKEN  = process.env.TELEGRAM_BOT_TOKEN;
 
 // ── IN-MEMORY DATA STORE ───────────────────────────────────────
-// Stores latest DP/WD data pushed from Apps Script
-let dpwdData    = [];  // [{ exchange, symbol, network, dep, wd, timestamp }]
+let dpwdData    = [];
 let lastSync    = "";
-// Stores per-user conversation state
-const userState = {};  // { chatId: { step, token } }
+const userState = {};
 
 // ── KRAKEN SIGNATURE ───────────────────────────────────────────
 function krakenSign(path, nonce, postData) {
@@ -39,8 +38,7 @@ function krakenPost(path, params) {
     const postData = "nonce=" + nonce + (params ? "&" + params : "");
     const sign     = krakenSign(path, nonce, postData);
     const options  = {
-      hostname: "api.kraken.com",
-      path, method: "POST",
+      hostname: "api.kraken.com", path, method: "POST",
       headers: {
         "API-Key": KRAKEN_KEY, "API-Sign": sign,
         "Content-Type": "application/x-www-form-urlencoded",
@@ -103,12 +101,9 @@ function mainMenuKeyboard() {
 }
 
 function exchangeKeyboard(prefix) {
-  const rows = [];
-  const btns = [{ text: "🏢 All Exchanges", callback_data: `${prefix}_ALL` }];
-  rows.push(btns);
-  const exchBtns = EXCHANGES.map(e => ({ text: e, callback_data: `${prefix}_${e}` }));
-  for (let i = 0; i < exchBtns.length; i += 3)
-    rows.push(exchBtns.slice(i, i + 3));
+  const rows = [[{ text: "🏢 All Exchanges", callback_data: `${prefix}_ALL` }]];
+  const btns = EXCHANGES.map(e => ({ text: e, callback_data: `${prefix}_${e}` }));
+  for (let i = 0; i < btns.length; i += 3) rows.push(btns.slice(i, i + 3));
   rows.push([{ text: "🔙 Back", callback_data: "menu_back" }]);
   return { inline_keyboard: rows };
 }
@@ -145,7 +140,6 @@ function buildHealthScores() {
     const emoji = score >= 90 ? "🟢" : score >= 70 ? "🟡" : "🔴";
     return { e, score, d, emoji };
   }).sort((a, b) => b.score - a.score);
-
   let msg = `📊 <b>EXCHANGE HEALTH SCORES</b>\n🕙 Last sync: ${lastSync}\n\n`;
   sorted.forEach(({ e, score, d, emoji }) => {
     msg += `${emoji} <b>${e}</b>: ${score}% (${d.healthy}/${d.total})\n`;
@@ -163,14 +157,12 @@ function buildSuspensions(exchange) {
     return exchange === "ALL"
       ? "✅ <b>ALL SYSTEMS CLEAR</b>\nNo suspensions detected across all exchanges."
       : `✅ <b>No suspensions</b> on ${exchange}.`;
-
   const grouped = {};
   rows.forEach(r => {
     if (!grouped[r.exchange]) grouped[r.exchange] = [];
     const label = r.dep === "❌" && r.wd === "❌" ? "DP & WD ❌" : r.dep === "❌" ? "DP ❌" : "WD ❌";
     grouped[r.exchange].push(`• ${r.symbol} (${r.network}) | ${label}`);
   });
-
   let msg = `🚨 <b>SUSPENSIONS${exchange !== "ALL" ? " — " + exchange : ""}</b>\n🕙 Last sync: ${lastSync}\n\n`;
   Object.entries(grouped).forEach(([exch, lines]) => {
     msg += `🏢 <b>${exch}</b>\n${lines.join("\n")}\n\n`;
@@ -186,20 +178,15 @@ function buildTokenResult(token, exchange, filter) {
   );
   if (rows.length === 0)
     return `❌ <b>${token.toUpperCase()}</b> not found${exchange !== "ALL" ? " on " + exchange : ""}.\n\nMake sure the token is in your Tickers sheet.`;
-
   if (filter === "open")      rows = rows.filter(r => r.dep === "✅" && r.wd === "✅");
   if (filter === "suspended") rows = rows.filter(r => r.dep === "❌" || r.wd === "❌");
-
   if (rows.length === 0)
     return filter === "open"
       ? `❌ No open networks for <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : ""}.`
       : `✅ No suspensions for <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : ""}.`;
-
   let msg = `🔍 <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : " — All Exchanges"}\n🕙 Last sync: ${lastSync}\n\n`;
   rows.forEach(r => {
-    const depIcon = r.dep === "✅" ? "✅" : "❌";
-    const wdIcon  = r.wd  === "✅" ? "✅" : "❌";
-    msg += `🏢 <b>${r.exchange}</b> | ${r.network}\n   DP ${depIcon}  WD ${wdIcon}\n`;
+    msg += `🏢 <b>${r.exchange}</b> | ${r.network}\n   DP ${r.dep}  WD ${r.wd}\n`;
   });
   return msg.trim();
 }
@@ -215,23 +202,17 @@ async function sendAllOpen(chatId, exchange) {
   if (rows.length === 0) {
     return sendMessage(chatId, `❌ No open tokens found${exchange !== "ALL" ? " on " + exchange : ""}.`, { reply_markup: backKeyboard() });
   }
-
   const grouped = {};
   rows.forEach(r => {
     if (!grouped[r.exchange]) grouped[r.exchange] = [];
     grouped[r.exchange].push(`• ${r.symbol} (${r.network})`);
   });
-
-  // Send header first
   await sendMessage(chatId, `✅ <b>ALL OPEN TOKENS${exchange !== "ALL" ? " — " + exchange : ""}</b>\n🕙 Last sync: ${lastSync}`);
-
-  // Send one message per exchange to avoid 4096 char limit
   const entries = Object.entries(grouped);
   for (let i = 0; i < entries.length; i++) {
     const [exch, lines] = entries[i];
     const isLast = i === entries.length - 1;
-    const msg = `🏢 <b>${exch}</b>\n${lines.join("\n")}`;
-    await sendMessage(chatId, msg, isLast ? { reply_markup: backKeyboard() } : {});
+    await sendMessage(chatId, `🏢 <b>${exch}</b>\n${lines.join("\n")}`, isLast ? { reply_markup: backKeyboard() } : {});
   }
 }
 
@@ -259,7 +240,6 @@ Type any token symbol directly (e.g. <code>SOL</code>, <code>BTC</code>) and the
 
 // ── HANDLE TELEGRAM UPDATE ────────────────────────────────────
 async function handleUpdate(update) {
-  // ── Callback query (button press) ──
   if (update.callback_query) {
     const cb     = update.callback_query;
     const chatId = cb.message.chat.id;
@@ -288,20 +268,14 @@ async function handleUpdate(update) {
     if (data === "menu_help") {
       return sendMessage(chatId, HELP_TEXT, { reply_markup: backKeyboard() });
     }
-
-    // Suspension exchange selected
     if (data.startsWith("suspend_")) {
       const exchange = decodeURIComponent(data.replace("suspend_", ""));
       return sendMessage(chatId, buildSuspensions(exchange), { reply_markup: backKeyboard() });
     }
-
-    // All open exchange selected
     if (data.startsWith("open_")) {
       const exchange = decodeURIComponent(data.replace("open_", ""));
       return sendAllOpen(chatId, exchange);
     }
-
-    // Token exchange selected — show filter
     if (data.startsWith("token_")) {
       const exchange = decodeURIComponent(data.replace("token_", ""));
       const token    = (userState[chatId] && userState[chatId].token) || "";
@@ -309,8 +283,6 @@ async function handleUpdate(update) {
       return sendMessage(chatId, `🔍 <b>${token}</b> on <b>${exchange === "ALL" ? "All Exchanges" : exchange}</b>\nFilter results:`,
         { reply_markup: filterKeyboard(token, exchange) });
     }
-
-    // Filter selected
     if (data.startsWith("filter_")) {
       const parts    = data.split("_");
       const filter   = parts[1];
@@ -318,26 +290,21 @@ async function handleUpdate(update) {
       const exchange = decodeURIComponent(parts.slice(3).join("_"));
       return sendMessage(chatId, buildTokenResult(token, exchange, filter), { reply_markup: backKeyboard() });
     }
-
     return;
   }
 
-  // ── Text message ──
   if (update.message && update.message.text) {
     const chatId = update.message.chat.id;
     const text   = update.message.text.trim();
     const lower  = text.toLowerCase();
     const state  = userState[chatId] || {};
 
-    // Greetings or /start
     if (lower === "/start" || lower === "hi" || lower === "hello" || lower === "hey") {
       userState[chatId] = {};
       return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
     }
-
-    // Awaiting token input after pressing Search Token button
     if (state.step === "awaiting_token") {
-      const token = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const token  = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
       if (!token) return sendMessage(chatId, "⚠️ Please enter a valid token symbol.", { reply_markup: backKeyboard() });
       const exists = dpwdData.some(r => r.symbol === token);
       if (!exists) return sendMessage(chatId,
@@ -347,8 +314,6 @@ async function handleUpdate(update) {
       return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`,
         { reply_markup: exchangeKeyboard("token") });
     }
-
-    // Direct token input — skip menu
     const token = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (token.length >= 2 && token.length <= 10) {
       const exists = dpwdData.some(r => r.symbol === token);
@@ -358,8 +323,6 @@ async function handleUpdate(update) {
           { reply_markup: exchangeKeyboard("token") });
       }
     }
-
-    // Fallback
     userState[chatId] = {};
     return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
   }
@@ -368,7 +331,7 @@ async function handleUpdate(update) {
 // ── HTTP SERVER ───────────────────────────────────────────────
 const server = http.createServer((req, res) => {
 
-  // ── BYBIT ──────────────────────────────────────────────────
+  // ── BYBIT ────────────────────────────────────────────────────
   if (req.url === "/bybit") {
     const ts         = Date.now().toString();
     const recvWindow = "5000";
@@ -388,7 +351,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── BINANCE ────────────────────────────────────────────────
+  // ── BINANCE ──────────────────────────────────────────────────
   if (req.url === "/binance") {
     const ts  = Date.now().toString();
     const qs  = "timestamp=" + ts;
@@ -407,67 +370,66 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── COINBASE ───────────────────────────────────────────────
+  // ── COINBASE ─────────────────────────────────────────────────
   if (req.url === "/coinbase") {
     function inferNetwork(txLink) {
       if (!txLink) return null;
-      if (txLink.includes("etherscan.io"))           return "ETH";
-      if (txLink.includes("explorer.solana.com"))    return "SOL";
+      if (txLink.includes("etherscan.io"))               return "ETH";
+      if (txLink.includes("explorer.solana.com"))        return "SOL";
       if (txLink.includes("explorer.cardano.org") ||
-          txLink.includes("cardanoscan.io"))          return "ADA";
+          txLink.includes("cardanoscan.io"))              return "ADA";
       if (txLink.includes("live.blockcypher.com/btc") ||
-          txLink.includes("blockstream.info"))        return "BTC";
-      if (txLink.includes("tronscan.org"))            return "TRX";
-      if (txLink.includes("bscscan.com"))             return "BSC";
-      if (txLink.includes("polygonscan.com"))         return "MATIC";
-      if (txLink.includes("arbiscan.io"))             return "ARB";
+          txLink.includes("blockstream.info"))            return "BTC";
+      if (txLink.includes("tronscan.org"))                return "TRX";
+      if (txLink.includes("bscscan.com"))                 return "BSC";
+      if (txLink.includes("polygonscan.com"))             return "MATIC";
+      if (txLink.includes("arbiscan.io"))                 return "ARB";
       if (txLink.includes("optimistic.etherscan") ||
-          txLink.includes("optimism.io"))             return "OP";
+          txLink.includes("optimism.io"))                 return "OP";
       if (txLink.includes("basescan.org") ||
-          txLink.includes("basescan.io"))             return "BASE";
+          txLink.includes("basescan.io"))                 return "BASE";
       if (txLink.includes("snowscan.xyz") ||
           txLink.includes("snowtrace.io") ||
-          txLink.includes("cchain.explorer.avax"))    return "AVAX";
-      if (txLink.includes("blastscan.io"))            return "BLAST";
-      if (txLink.includes("tonscan.org"))             return "TON";
+          txLink.includes("cchain.explorer.avax"))        return "AVAX";
+      if (txLink.includes("blastscan.io"))                return "BLAST";
+      if (txLink.includes("tonscan.org"))                 return "TON";
       if (txLink.includes("explorer.sui.io") ||
-          txLink.includes("suiscan.xyz"))             return "SUI";
-      if (txLink.includes("taostats.io"))             return "TAO";
-      if (txLink.includes("sonicscan.org"))           return "SONIC";
-      if (txLink.includes("monadexplorer.com"))       return "MONAD";
-      if (txLink.includes("explorer.zksync.io"))      return "ZKSYNC";
-      if (txLink.includes("hashscan.io"))             return "HBAR";
-      if (txLink.includes("minaexplorer.com"))        return "MINA";
+          txLink.includes("suiscan.xyz"))                 return "SUI";
+      if (txLink.includes("taostats.io"))                 return "TAO";
+      if (txLink.includes("sonicscan.org"))               return "SONIC";
+      if (txLink.includes("monadexplorer.com"))           return "MONAD";
+      if (txLink.includes("explorer.zksync.io"))          return "ZKSYNC";
+      if (txLink.includes("hashscan.io"))                 return "HBAR";
+      if (txLink.includes("minaexplorer.com"))            return "MINA";
       if (txLink.includes("assethub-polkadot") ||
-          txLink.includes("assethub-kusama"))         return "DOT";
-      if (txLink.includes("explore.vechain.org"))     return "VET";
+          txLink.includes("assethub-kusama"))             return "DOT";
+      if (txLink.includes("explore.vechain.org"))         return "VET";
       if (txLink.includes("explorer.near.org") ||
-          txLink.includes("wallet.near.org"))         return "NEAR";
-      if (txLink.includes("bithomp.com"))             return "XRP";
-      if (txLink.includes("stellar.expert"))          return "XLM";
-      if (txLink.includes("tzstats.com"))             return "XTZ";
-      if (txLink.includes("flowscan.org"))            return "FLOW";
-      if (txLink.includes("mintscan.io"))             return "COSMOS";
-      if (txLink.includes("filfox.info"))             return "FIL";
-      if (txLink.includes("explorer.stacks.co"))      return "STX";
-      if (txLink.includes("scan.coredao.org"))        return "CORE";
-      if (txLink.includes("axelarscan.io"))           return "AXL";
-      if (txLink.includes("oasisscan.com"))           return "ROSE";
-      if (txLink.includes("hyperscan.com"))           return "HYPE";
-      if (txLink.includes("routescan.io"))            return "BERA";
-      if (txLink.includes("dogechain.info"))          return "DOGE";
-      if (txLink.includes("live.blockcypher.com/ltc")) return "LTC";
+          txLink.includes("wallet.near.org"))             return "NEAR";
+      if (txLink.includes("bithomp.com"))                 return "XRP";
+      if (txLink.includes("stellar.expert"))              return "XLM";
+      if (txLink.includes("tzstats.com"))                 return "XTZ";
+      if (txLink.includes("flowscan.org"))                return "FLOW";
+      if (txLink.includes("mintscan.io"))                 return "COSMOS";
+      if (txLink.includes("filfox.info"))                 return "FIL";
+      if (txLink.includes("explorer.stacks.co"))          return "STX";
+      if (txLink.includes("scan.coredao.org"))            return "CORE";
+      if (txLink.includes("axelarscan.io"))               return "AXL";
+      if (txLink.includes("oasisscan.com"))               return "ROSE";
+      if (txLink.includes("hyperscan.com"))               return "HYPE";
+      if (txLink.includes("routescan.io"))                return "BERA";
+      if (txLink.includes("dogechain.info"))              return "DOGE";
+      if (txLink.includes("live.blockcypher.com/ltc"))    return "LTC";
       if (txLink.includes("blockchair.com/bitcoin-cash")) return "BCH";
-      if (txLink.includes("algoexplorer.io"))         return "ALGO";
-      if (txLink.includes("explorer.celo.org"))       return "CELO";
-      if (txLink.includes("explorer.aptoslabs.com"))  return "APT";
-      if (txLink.includes("explorer.provable.com"))   return "ALEO";
-      if (txLink.includes("explorer.elrond.com"))     return "EGLD";
-      if (txLink.includes("flare-explorer.flare"))    return "FLR";
-      if (txLink.includes("lineascan.build"))         return "LINEA";
+      if (txLink.includes("algoexplorer.io"))             return "ALGO";
+      if (txLink.includes("explorer.celo.org"))           return "CELO";
+      if (txLink.includes("explorer.aptoslabs.com"))      return "APT";
+      if (txLink.includes("explorer.provable.com"))       return "ALEO";
+      if (txLink.includes("explorer.elrond.com"))         return "EGLD";
+      if (txLink.includes("flare-explorer.flare"))        return "FLR";
+      if (txLink.includes("lineascan.build"))             return "LINEA";
       return null;
     }
-
     const ts     = Math.floor(Date.now() / 1000).toString();
     const secret = Buffer.from(COINBASE_SECRET, "base64");
     const sig    = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
@@ -497,7 +459,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── KRAKEN ─────────────────────────────────────────────────
+  // ── KRAKEN ───────────────────────────────────────────────────
   if (req.url === "/kraken") {
     let body = "";
     req.on("data", chunk => body += chunk);
@@ -548,7 +510,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── COINBASE DEBUG ─────────────────────────────────────────
+  // ── COINBASE DEBUG ───────────────────────────────────────────
   if (req.url.startsWith("/coinbase-debug")) {
     const qs     = req.url.includes("?") ? req.url.split("?")[1] : "";
     const param  = new URLSearchParams(qs).get("coins");
@@ -578,7 +540,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── DATA PUSH (from Apps Script) ──────────────────────────
+  // ── DATA PUSH (from Apps Script) ─────────────────────────────
   if (req.url === "/data" && req.method === "POST") {
     let body = "";
     req.on("data", chunk => body += chunk);
@@ -600,7 +562,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── TELEGRAM WEBHOOK ──────────────────────────────────────
+  // ── TELEGRAM WEBHOOK ─────────────────────────────────────────
   if (req.url === "/webhook") {
     if (req.method !== "POST") {
       res.writeHead(200); res.end("webhook ok - awaiting POST");
