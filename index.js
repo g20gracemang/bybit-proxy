@@ -587,14 +587,21 @@ const server = http.createServer((req, res) => {
   }
 
   // ── TELEGRAM WEBHOOK ──────────────────────────────────────
-  if (req.url === "/webhook" && req.method === "POST") {
+  if (req.url === "/webhook") {
+    if (req.method !== "POST") {
+      res.writeHead(200); res.end("webhook ok - awaiting POST");
+      return;
+    }
     let body = "";
     req.on("data", chunk => body += chunk);
     req.on("end", () => {
+      console.log("📩 Webhook received:", body.slice(0, 200));
       try {
         const update = JSON.parse(body);
-        handleUpdate(update).catch(() => {});
-      } catch(e) {}
+        handleUpdate(update).catch(e => console.log("❌ handleUpdate error:", e));
+      } catch(e) {
+        console.log("❌ Webhook parse error:", e.message);
+      }
       res.writeHead(200); res.end("ok");
     });
     return;
