@@ -1,4 +1,8 @@
-const https   = require("https");
+// ─── SEXTA-TRACKER PROXY + BOT v5.0 ──────────────────────────
+// Exchanges : Bybit · Binance · Coinbase · Kraken
+// Bot       : Telegram webhook with inline keyboard
+// Data      : Receives DP/WD push from Apps Script every 10 min
+// ─────────────────────────────────────────────────────────────
 const http    = require("http");
 const crypto  = require("crypto");
 
@@ -200,13 +204,17 @@ function buildTokenResult(token, exchange, filter) {
   return msg.trim();
 }
 
-function buildAllOpen(exchange) {
-  if (dpwdData.length === 0) return "⚠️ No data available yet. Please wait for the next sync.";
+async function sendAllOpen(chatId, exchange) {
+  if (dpwdData.length === 0) {
+    return sendMessage(chatId, "⚠️ No data available yet. Please wait for the next sync.", { reply_markup: backKeyboard() });
+  }
   const rows = dpwdData.filter(r =>
     (exchange === "ALL" || r.exchange === exchange) &&
     r.dep === "✅" && r.wd === "✅"
   );
-  if (rows.length === 0) return `❌ No open tokens found${exchange !== "ALL" ? " on " + exchange : ""}.`;
+  if (rows.length === 0) {
+    return sendMessage(chatId, `❌ No open tokens found${exchange !== "ALL" ? " on " + exchange : ""}.`, { reply_markup: backKeyboard() });
+  }
 
   const grouped = {};
   rows.forEach(r => {
@@ -214,11 +222,17 @@ function buildAllOpen(exchange) {
     grouped[r.exchange].push(`• ${r.symbol} (${r.network})`);
   });
 
-  let msg = `✅ <b>ALL OPEN TOKENS${exchange !== "ALL" ? " — " + exchange : ""}</b>\n🕙 Last sync: ${lastSync}\n\n`;
-  Object.entries(grouped).forEach(([exch, lines]) => {
-    msg += `🏢 <b>${exch}</b>\n${lines.join("\n")}\n\n`;
-  });
-  return msg.trim();
+  // Send header first
+  await sendMessage(chatId, `✅ <b>ALL OPEN TOKENS${exchange !== "ALL" ? " — " + exchange : ""}</b>\n🕙 Last sync: ${lastSync}`);
+
+  // Send one message per exchange to avoid 4096 char limit
+  const entries = Object.entries(grouped);
+  for (let i = 0; i < entries.length; i++) {
+    const [exch, lines] = entries[i];
+    const isLast = i === entries.length - 1;
+    const msg = `🏢 <b>${exch}</b>\n${lines.join("\n")}`;
+    await sendMessage(chatId, msg, isLast ? { reply_markup: backKeyboard() } : {});
+  }
 }
 
 const HELP_TEXT = `❓ <b>SEXTA-TRACKER BOT GUIDE</b>
@@ -284,7 +298,7 @@ async function handleUpdate(update) {
     // All open exchange selected
     if (data.startsWith("open_")) {
       const exchange = decodeURIComponent(data.replace("open_", ""));
-      return sendMessage(chatId, buildAllOpen(exchange), { reply_markup: backKeyboard() });
+      return sendAllOpen(chatId, exchange);
     }
 
     // Token exchange selected — show filter
