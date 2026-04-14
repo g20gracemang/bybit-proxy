@@ -2,7 +2,7 @@
 // Exchanges : Bybit · Binance · Coinbase · Kraken
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
-// Fix       : Kraken multi-network + ticker mapping + chunking
+// Fix       : Kraken sequential processing + rate limit recovery
 // ─────────────────────────────────────────────────────────────
 const https  = require("https");
 const http   = require("http");
@@ -302,13 +302,11 @@ async function handleUpdate(update) {
 
     if (data === "menu_back" || data === "menu_start") {
       userState[chatId] = {};
-      return sendMessage(chatId, "👋 Hello, what would you like to do?",
-        { reply_markup: mainMenuKeyboard() });
+      return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
     }
     if (data === "menu_search") {
       userState[chatId] = { step: "awaiting_token" };
-      return sendMessage(chatId, "🔍 Please type the token symbol:\n<i>e.g. SOL, BTC, ETH</i>",
-        { reply_markup: backKeyboard() });
+      return sendMessage(chatId, "🔍 Please type the token symbol:\n<i>e.g. SOL, BTC, ETH</i>", { reply_markup: backKeyboard() });
     }
     if (data === "menu_health")  return sendMessage(chatId, buildHealthScores(), { reply_markup: backKeyboard() });
     if (data === "menu_suspend") {
@@ -519,12 +517,11 @@ const server = http.createServer((req, res) => {
     req.on("data", chunk => body += chunk);
     req.on("end", () => {
       const tickers = body.split(",").map(t => t.trim().toUpperCase()).filter(Boolean);
-      console.log("📋 Kraken tickers:", tickers);
+      console.log("📋 Kraken tickers:", tickers.length);
       if (!tickers.length) {
         res.writeHead(400); res.end(JSON.stringify({ error: "No tickers provided" })); return;
       }
 
-      // Kraken uses different names for some coins
       const KRAKEN_TICKER_MAP = {
         "BTC":  "XBT",
         "DOGE": "XDG",
@@ -551,58 +548,62 @@ const server = http.createServer((req, res) => {
             });
           } catch(e) { console.log("❌ Kraken assets error:", e.message); }
 
-          const promises = tickers.map((coin, i) =>
-            new Promise(resolve => setTimeout(() => {
-              // Map common ticker differences first
-              const mappedCoin = KRAKEN_TICKER_MAP[coin] || coin;
-              // Look up Kraken internal asset ID
-              const krakenId   = altToId[mappedCoin] || altToId[coin] || mappedCoin;
-              const wdOk       = wdStatus[mappedCoin] !== undefined ? wdStatus[mappedCoin]
-                               : wdStatus[coin] !== undefined ? wdStatus[coin]
-                               : wdStatus[krakenId.toUpperCase()] !== undefined ? wdStatus[krakenId.toUpperCase()]
-                               : true;
+          // Process sequentially to avoid rate limits
+          const results = [];
+          let rateLimited = false;
 
-              console.log(`🔍 Kraken ${coin} → mapped:${mappedCoin} krakenId:${krakenId} wdOk:${wdOk}`);
+          const processNext = (index) => {
+            if (index >= tickers.length) {
+              console.log(`✅ Kraken final result: ${results.length} rows`);
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(results));
+              return;
+            }
 
-              krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
-                .then(depData => {
-                  const methods = depData.result || [];
-                  const errors  = depData.error || [];
-                  console.log(`✅ Kraken ${coin} methods: ${JSON.stringify(methods.map(m => m.method))} errors: ${JSON.stringify(errors)}`);
+            const coin       = tickers[index];
+            const mappedCoin = KRAKEN_TICKER_MAP[coin] || coin;
+            const krakenId   = altToId[mappedCoin] || altToId[coin] || mappedCoin;
+            const wdOk       = wdStatus[mappedCoin] !== undefined ? wdStatus[mappedCoin]
+                             : wdStatus[coin] !== undefined ? wdStatus[coin]
+                             : wdStatus[krakenId.toUpperCase()] !== undefined ? wdStatus[krakenId.toUpperCase()]
+                             : true;
 
-                  if (methods.length === 0) {
-                    // Fallback: try with original coin symbol
-                    return krakenPost("/0/private/DepositMethods", "asset=" + coin)
-                      .then(depData2 => {
-                        const methods2 = depData2.result || [];
-                        const errors2  = depData2.error || [];
-                        console.log(`🔄 Kraken ${coin} fallback methods: ${JSON.stringify(methods2.map(m => m.method))} errors: ${JSON.stringify(errors2)}`);
-                        if (methods2.length === 0) {
-                          resolve([{ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk }]);
-                        } else {
-                          resolve(methods2.map(m => ({ coin, network: m.method, depositEnable: true, withdrawEnable: wdOk })));
-                        }
-                      })
-                      .catch(() => resolve([{ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk }]));
-                  }
+            if (rateLimited) {
+              results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
+              setTimeout(() => processNext(index + 1), 100);
+              return;
+            }
 
-                  resolve(methods.map(m => ({ coin, network: m.method, depositEnable: true, withdrawEnable: wdOk })));
-                })
-                .catch(e => {
-                  console.log(`❌ Kraken ${coin} error: ${e.message}`);
-                  resolve([{ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk }]);
-                });
-            }, i * 200))
-          );
+            krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
+              .then(depData => {
+                const methods = depData.result || [];
+                const errors  = depData.error || [];
 
-          Promise.all(promises).then(arrays => {
-            const result = arrays.flat();
-            console.log(`✅ Kraken final result: ${result.length} rows`);
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(result));
-          }).catch(e => {
-            res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
-          });
+                if (errors.some(e => e.includes("Rate limit"))) {
+                  console.log(`⚠️ Kraken rate limited at ${coin} (${index}/${tickers.length})`);
+                  rateLimited = true;
+                  results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
+                  setTimeout(() => { rateLimited = false; processNext(index + 1); }, 5000);
+                  return;
+                }
+
+                if (methods.length > 0) {
+                  methods.forEach(m => results.push({ coin, network: m.method, depositEnable: true, withdrawEnable: wdOk }));
+                  console.log(`✅ Kraken ${coin}: ${methods.length} networks`);
+                } else {
+                  results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
+                  console.log(`⚠️ Kraken ${coin}: no networks found`);
+                }
+                setTimeout(() => processNext(index + 1), 500);
+              })
+              .catch(e => {
+                console.log(`❌ Kraken ${coin} error: ${e.message}`);
+                results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
+                setTimeout(() => processNext(index + 1), 500);
+              });
+          };
+
+          processNext(0);
         });
       });
       pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
