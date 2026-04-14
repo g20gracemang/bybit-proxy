@@ -1,8 +1,8 @@
-// ─── SEXTA-TRACKER PROXY + BOT v5.1 ──────────────────────────
+// ─── SEXTA-TRACKER PROXY + BOT v5.2 ──────────────────────────
 // Exchanges : Bybit · Binance · Coinbase · Kraken
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
-// Fix       : Token results & All Open split per exchange + chunking
+// Fix       : Kraken multi-network + ticker mapping + chunking
 // ─────────────────────────────────────────────────────────────
 const https  = require("https");
 const http   = require("http");
@@ -132,17 +132,14 @@ function backKeyboard() {
 async function safeSendExchange(chatId, exch, lines, addBackButton) {
   const LIMIT = 3800;
   let chunk   = `🏢 <b>${exch}</b>\n`;
-
   for (let i = 0; i < lines.length; i++) {
     const line   = lines[i] + "\n";
     const isLast = i === lines.length - 1;
-
     if ((chunk + line).length > LIMIT) {
       await sendMessage(chatId, chunk.trim());
       chunk = `🏢 <b>${exch} (cont.)</b>\n`;
     }
     chunk += line;
-
     if (isLast) {
       await sendMessage(chatId, chunk.trim(),
         addBackButton ? { reply_markup: backKeyboard() } : {}
@@ -226,20 +223,14 @@ async function sendTokenResult(chatId, token, exchange, filter) {
         : `✅ No suspensions for <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : ""}.`,
       { reply_markup: backKeyboard() });
   }
-
-  // Group by exchange
   const grouped = {};
   rows.forEach(r => {
     if (!grouped[r.exchange]) grouped[r.exchange] = [];
     grouped[r.exchange].push(`   ${r.network} | DP ${r.dep}  WD ${r.wd}`);
   });
-
-  // Header
   await sendMessage(chatId,
     `🔍 <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : " — All Exchanges"}\n🕙 Last sync: ${lastSync}`
   );
-
-  // One message per exchange with chunking
   const entries = Object.entries(grouped);
   for (let i = 0; i < entries.length; i++) {
     const [exch, lines] = entries[i];
@@ -268,13 +259,9 @@ async function sendAllOpen(chatId, exchange) {
     if (!grouped[r.exchange]) grouped[r.exchange] = [];
     grouped[r.exchange].push(`• ${r.symbol} (${r.network})`);
   });
-
-  // Header
   await sendMessage(chatId,
     `✅ <b>ALL OPEN TOKENS${exchange !== "ALL" ? " — " + exchange : ""}</b>\n🕙 Last sync: ${lastSync}`
   );
-
-  // One message per exchange with chunking
   const entries = Object.entries(grouped);
   for (let i = 0; i < entries.length; i++) {
     const [exch, lines] = entries[i];
@@ -307,8 +294,6 @@ Type any token symbol directly (e.g. <code>SOL</code>, <code>BTC</code>) and the
 
 // ── HANDLE TELEGRAM UPDATE ────────────────────────────────────
 async function handleUpdate(update) {
-
-  // ── Callback query (button press) ──────────────────────────
   if (update.callback_query) {
     const cb     = update.callback_query;
     const chatId = cb.message.chat.id;
@@ -325,36 +310,24 @@ async function handleUpdate(update) {
       return sendMessage(chatId, "🔍 Please type the token symbol:\n<i>e.g. SOL, BTC, ETH</i>",
         { reply_markup: backKeyboard() });
     }
-    if (data === "menu_health") {
-      return sendMessage(chatId, buildHealthScores(), { reply_markup: backKeyboard() });
-    }
+    if (data === "menu_health")  return sendMessage(chatId, buildHealthScores(), { reply_markup: backKeyboard() });
     if (data === "menu_suspend") {
       userState[chatId] = { step: "suspensions" };
-      return sendMessage(chatId, "🚨 Choose an exchange:",
-        { reply_markup: exchangeKeyboard("suspend") });
+      return sendMessage(chatId, "🚨 Choose an exchange:", { reply_markup: exchangeKeyboard("suspend") });
     }
     if (data === "menu_open") {
       userState[chatId] = { step: "open" };
-      return sendMessage(chatId, "✅ Choose an exchange:",
-        { reply_markup: exchangeKeyboard("open") });
+      return sendMessage(chatId, "✅ Choose an exchange:", { reply_markup: exchangeKeyboard("open") });
     }
-    if (data === "menu_help") {
-      return sendMessage(chatId, HELP_TEXT, { reply_markup: backKeyboard() });
-    }
+    if (data === "menu_help") return sendMessage(chatId, HELP_TEXT, { reply_markup: backKeyboard() });
     if (data.startsWith("suspend_")) {
-      const exchange = decodeURIComponent(data.replace("suspend_", ""));
-      return sendMessage(chatId, buildSuspensions(exchange), { reply_markup: backKeyboard() });
+      return sendMessage(chatId, buildSuspensions(decodeURIComponent(data.replace("suspend_", ""))), { reply_markup: backKeyboard() });
     }
-    if (data.startsWith("open_")) {
-      const exchange = decodeURIComponent(data.replace("open_", ""));
-      return sendAllOpen(chatId, exchange);
-    }
+    if (data.startsWith("open_"))   return sendAllOpen(chatId, decodeURIComponent(data.replace("open_", "")));
     if (data.startsWith("token_")) {
       const exchange = decodeURIComponent(data.replace("token_", ""));
       const token    = (userState[chatId] && userState[chatId].token) || "";
-      if (!token) return sendMessage(chatId,
-        "⚠️ Session expired. Please search again.",
-        { reply_markup: mainMenuKeyboard() });
+      if (!token) return sendMessage(chatId, "⚠️ Session expired. Please search again.", { reply_markup: mainMenuKeyboard() });
       return sendMessage(chatId,
         `🔍 <b>${token}</b> on <b>${exchange === "ALL" ? "All Exchanges" : exchange}</b>\nFilter results:`,
         { reply_markup: filterKeyboard(token, exchange) });
@@ -369,26 +342,19 @@ async function handleUpdate(update) {
     return;
   }
 
-  // ── Text message ────────────────────────────────────────────
   if (update.message && update.message.text) {
     const chatId = update.message.chat.id;
     const text   = update.message.text.trim();
     const lower  = text.toLowerCase();
     const state  = userState[chatId] || {};
 
-    // Greetings / start
     if (lower === "/start" || lower === "hi" || lower === "hello" || lower === "hey") {
       userState[chatId] = {};
-      return sendMessage(chatId, "👋 Hello, what would you like to do?",
-        { reply_markup: mainMenuKeyboard() });
+      return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
     }
-
-    // Awaiting token after Search Token button
     if (state.step === "awaiting_token") {
       const token  = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
-      if (!token) return sendMessage(chatId,
-        "⚠️ Please enter a valid token symbol.",
-        { reply_markup: backKeyboard() });
+      if (!token) return sendMessage(chatId, "⚠️ Please enter a valid token symbol.", { reply_markup: backKeyboard() });
       const exists = dpwdData.some(r => r.symbol === token);
       if (!exists) return sendMessage(chatId,
         `❌ <b>${token}</b> not found in tracked tokens.\n\n` +
@@ -397,29 +363,22 @@ async function handleUpdate(update) {
         `If data shows 0 rows, please run a manual sync from Apps Script.`,
         { reply_markup: backKeyboard() });
       userState[chatId] = { step: "awaiting_exchange", token };
-      return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`,
-        { reply_markup: exchangeKeyboard("token") });
+      return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`, { reply_markup: exchangeKeyboard("token") });
     }
-
-    // Direct token input — skip menu
     const token = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (token.length >= 2 && token.length <= 10) {
       const exists = dpwdData.some(r => r.symbol === token);
       if (exists) {
         userState[chatId] = { step: "awaiting_exchange", token };
-        return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`,
-          { reply_markup: exchangeKeyboard("token") });
+        return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`, { reply_markup: exchangeKeyboard("token") });
       } else if (dpwdData.length === 0) {
         return sendMessage(chatId,
           `⚠️ No data loaded yet.\n🕙 Last sync: ${lastSync || "never"}\n\nPlease wait for the next sync or run manually from Apps Script.`,
           { reply_markup: backKeyboard() });
       }
     }
-
-    // Fallback — show main menu
     userState[chatId] = {};
-    return sendMessage(chatId, "👋 Hello, what would you like to do?",
-      { reply_markup: mainMenuKeyboard() });
+    return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
   }
 }
 
@@ -434,10 +393,7 @@ const server = http.createServer((req, res) => {
     const signature  = crypto.createHmac("sha256", BYBIT_SECRET).update(paramStr).digest("hex");
     const options    = {
       hostname: "api.bybit.com", path: "/v5/asset/coin/query-info", method: "GET",
-      headers: {
-        "X-BAPI-API-KEY": BYBIT_KEY, "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-SIGN": signature, "X-BAPI-RECV-WINDOW": recvWindow, "Accept": "application/json"
-      }
+      headers: { "X-BAPI-API-KEY": BYBIT_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": signature, "X-BAPI-RECV-WINDOW": recvWindow, "Accept": "application/json" }
     };
     const proxy = https.request(options, bybitRes => {
       let data = "";
@@ -455,8 +411,7 @@ const server = http.createServer((req, res) => {
     const qs  = "timestamp=" + ts;
     const sig = crypto.createHmac("sha256", BINANCE_SECRET).update(qs).digest("hex");
     const options = {
-      hostname: "api.binance.com",
-      path: `/sapi/v1/capital/config/getall?${qs}&signature=${sig}`, method: "GET",
+      hostname: "api.binance.com", path: `/sapi/v1/capital/config/getall?${qs}&signature=${sig}`, method: "GET",
       headers: { "X-MBX-APIKEY": BINANCE_KEY, "Accept": "application/json" }
     };
     const proxy = https.request(options, binRes => {
@@ -534,11 +489,7 @@ const server = http.createServer((req, res) => {
     const sig    = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
     const opts   = {
       hostname: "api.exchange.coinbase.com", path: "/currencies", method: "GET",
-      headers: {
-        "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig,
-        "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
-        "User-Agent": "sexta-tracker/1.0", "Accept": "application/json"
-      }
+      headers: { "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig, "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE, "User-Agent": "sexta-tracker/1.0", "Accept": "application/json" }
     };
     const proxy = https.request(opts, cbRes => {
       let data = "";
@@ -549,11 +500,7 @@ const server = http.createServer((req, res) => {
           const result = currencies.map(c => {
             const details = c.details || {};
             const network = inferNetwork(details.crypto_transaction_link) || c.id.toUpperCase();
-            return {
-              id: c.id, status: c.status, network,
-              deposit_enabled:  c.status === "online",
-              withdraw_enabled: c.status === "online"
-            };
+            return { id: c.id, status: c.status, network, deposit_enabled: c.status === "online", withdraw_enabled: c.status === "online" };
           });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(result));
@@ -567,13 +514,22 @@ const server = http.createServer((req, res) => {
 
   // ── KRAKEN ───────────────────────────────────────────────────
   if (req.url === "/kraken") {
+    console.log("📩 Kraken request received");
     let body = "";
     req.on("data", chunk => body += chunk);
     req.on("end", () => {
-      const tickers = body.split(",").map(t => t.trim()).filter(Boolean);
+      const tickers = body.split(",").map(t => t.trim().toUpperCase()).filter(Boolean);
+      console.log("📋 Kraken tickers:", tickers);
       if (!tickers.length) {
         res.writeHead(400); res.end(JSON.stringify({ error: "No tickers provided" })); return;
       }
+
+      // Kraken uses different names for some coins
+      const KRAKEN_TICKER_MAP = {
+        "BTC":  "XBT",
+        "DOGE": "XDG",
+      };
+
       const pubReq = https.request({
         hostname: "api.kraken.com", path: "/0/public/Assets",
         method: "GET", headers: { "Accept": "application/json" }
@@ -581,42 +537,67 @@ const server = http.createServer((req, res) => {
         let pubData = "";
         pubRes.on("data", c => pubData += c);
         pubRes.on("end", () => {
-          let altToId = {}, wdStatus = {};
+          const altToId  = {};
+          const wdStatus = {};
           try {
             const assets = JSON.parse(pubData).result || {};
             Object.entries(assets).forEach(([id, info]) => {
               const alt = info.altname.toUpperCase();
-              altToId[alt] = id; altToId[id.toUpperCase()] = id;
+              altToId[alt] = id;
+              altToId[id.toUpperCase()] = id;
               const wdOk = info.status === "enabled" || info.status === "withdrawal_only";
-              wdStatus[id] = wdOk; wdStatus[alt] = wdOk;
+              wdStatus[id.toUpperCase()] = wdOk;
+              wdStatus[alt] = wdOk;
             });
-          } catch(e) {}
+          } catch(e) { console.log("❌ Kraken assets error:", e.message); }
+
           const promises = tickers.map((coin, i) =>
             new Promise(resolve => setTimeout(() => {
-              const krakenId = altToId[coin.toUpperCase()] || coin;
-              const wdOk     = wdStatus[coin.toUpperCase()] !== undefined
-                ? wdStatus[coin.toUpperCase()] : true;
+              // Map common ticker differences first
+              const mappedCoin = KRAKEN_TICKER_MAP[coin] || coin;
+              // Look up Kraken internal asset ID
+              const krakenId   = altToId[mappedCoin] || altToId[coin] || mappedCoin;
+              const wdOk       = wdStatus[mappedCoin] !== undefined ? wdStatus[mappedCoin]
+                               : wdStatus[coin] !== undefined ? wdStatus[coin]
+                               : wdStatus[krakenId.toUpperCase()] !== undefined ? wdStatus[krakenId.toUpperCase()]
+                               : true;
+
+              console.log(`🔍 Kraken ${coin} → mapped:${mappedCoin} krakenId:${krakenId} wdOk:${wdOk}`);
+
               krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
                 .then(depData => {
-                  const depMethods = (depData.result || []).map(m => m.method);
-                  if (depMethods.length === 0) {
-                    resolve([{
-                      coin, network: "ALL NETWORKS",
-                      depositEnable:  wdStatus[coin.toUpperCase()] !== undefined ? wdStatus[coin.toUpperCase()] : true,
-                      withdrawEnable: wdOk
-                    }]);
-                    return;
+                  const methods = depData.result || [];
+                  console.log(`✅ Kraken ${coin} methods: ${JSON.stringify(methods.map(m => m.method))}`);
+
+                  if (methods.length === 0) {
+                    // Fallback: try with original coin symbol
+                    return krakenPost("/0/private/DepositMethods", "asset=" + coin)
+                      .then(depData2 => {
+                        const methods2 = depData2.result || [];
+                        console.log(`🔄 Kraken ${coin} fallback methods: ${JSON.stringify(methods2.map(m => m.method))}`);
+                        if (methods2.length === 0) {
+                          resolve([{ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk }]);
+                        } else {
+                          resolve(methods2.map(m => ({ coin, network: m.method, depositEnable: true, withdrawEnable: wdOk })));
+                        }
+                      })
+                      .catch(() => resolve([{ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk }]));
                   }
-                  resolve(depMethods.map(network => ({
-                    coin, network, depositEnable: true, withdrawEnable: wdOk
-                  })));
+
+                  resolve(methods.map(m => ({ coin, network: m.method, depositEnable: true, withdrawEnable: wdOk })));
                 })
-                .catch(() => resolve([]));
-            }, i * 150))
+                .catch(e => {
+                  console.log(`❌ Kraken ${coin} error: ${e.message}`);
+                  resolve([{ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk }]);
+                });
+            }, i * 200))
           );
+
           Promise.all(promises).then(arrays => {
+            const result = arrays.flat();
+            console.log(`✅ Kraken final result: ${result.length} rows`);
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(arrays.flat()));
+            res.end(JSON.stringify(result));
           }).catch(e => {
             res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
           });
@@ -638,11 +619,7 @@ const server = http.createServer((req, res) => {
     const sig    = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
     const opts   = {
       hostname: "api.exchange.coinbase.com", path: "/currencies", method: "GET",
-      headers: {
-        "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig,
-        "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
-        "User-Agent": "sexta-tracker/1.0", "Accept": "application/json"
-      }
+      headers: { "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig, "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE, "User-Agent": "sexta-tracker/1.0", "Accept": "application/json" }
     };
     const r = https.request(opts, resp => {
       let d = "";
@@ -650,9 +627,8 @@ const server = http.createServer((req, res) => {
       resp.on("end", () => {
         try {
           const all    = JSON.parse(d);
-          const sample = all
-            .filter(c => filter.length === 0 || filter.includes(c.id.toUpperCase()))
-            .map(c => ({ id: c.id, status: c.status, details: c.details }));
+          const sample = all.filter(c => filter.length === 0 || filter.includes(c.id.toUpperCase()))
+                            .map(c => ({ id: c.id, status: c.status, details: c.details }));
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(sample, null, 2));
         } catch(e) { res.writeHead(500); res.end(d); }
