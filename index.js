@@ -567,14 +567,16 @@ const server = http.createServer((req, res) => {
               krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
                 .then(depData => {
                   const methods = depData.result || [];
-                  console.log(`✅ Kraken ${coin} methods: ${JSON.stringify(methods.map(m => m.method))}`);
+                  const errors  = depData.error || [];
+                  console.log(`✅ Kraken ${coin} methods: ${JSON.stringify(methods.map(m => m.method))} errors: ${JSON.stringify(errors)}`);
 
                   if (methods.length === 0) {
                     // Fallback: try with original coin symbol
                     return krakenPost("/0/private/DepositMethods", "asset=" + coin)
                       .then(depData2 => {
                         const methods2 = depData2.result || [];
-                        console.log(`🔄 Kraken ${coin} fallback methods: ${JSON.stringify(methods2.map(m => m.method))}`);
+                        const errors2  = depData2.error || [];
+                        console.log(`🔄 Kraken ${coin} fallback methods: ${JSON.stringify(methods2.map(m => m.method))} errors: ${JSON.stringify(errors2)}`);
                         if (methods2.length === 0) {
                           resolve([{ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk }]);
                         } else {
