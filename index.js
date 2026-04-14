@@ -170,25 +170,51 @@ function buildSuspensions(exchange) {
   return msg.trim();
 }
 
-function buildTokenResult(token, exchange, filter) {
-  if (dpwdData.length === 0) return "⚠️ No data available yet. Please wait for the next sync.";
+async function sendTokenResult(chatId, token, exchange, filter) {
+  if (dpwdData.length === 0) {
+    return sendMessage(chatId, "⚠️ No data available yet. Please wait for the next sync.", { reply_markup: backKeyboard() });
+  }
   let rows = dpwdData.filter(r =>
     r.symbol === token.toUpperCase() &&
     (exchange === "ALL" || r.exchange === exchange)
   );
-  if (rows.length === 0)
-    return `❌ <b>${token.toUpperCase()}</b> not found${exchange !== "ALL" ? " on " + exchange : ""}.\n\nMake sure the token is in your Tickers sheet.`;
+  if (rows.length === 0) {
+    return sendMessage(chatId,
+      `❌ <b>${token.toUpperCase()}</b> not found${exchange !== "ALL" ? " on " + exchange : ""}.\n\nMake sure the token is in your Tickers sheet.`,
+      { reply_markup: backKeyboard() });
+  }
   if (filter === "open")      rows = rows.filter(r => r.dep === "✅" && r.wd === "✅");
   if (filter === "suspended") rows = rows.filter(r => r.dep === "❌" || r.wd === "❌");
-  if (rows.length === 0)
-    return filter === "open"
-      ? `❌ No open networks for <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : ""}.`
-      : `✅ No suspensions for <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : ""}.`;
-  let msg = `🔍 <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : " — All Exchanges"}\n🕙 Last sync: ${lastSync}\n\n`;
+  if (rows.length === 0) {
+    return sendMessage(chatId,
+      filter === "open"
+        ? `❌ No open networks for <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : ""}.`
+        : `✅ No suspensions for <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : ""}.`,
+      { reply_markup: backKeyboard() });
+  }
+
+  // Group by exchange to avoid message length limits
+  const grouped = {};
   rows.forEach(r => {
-    msg += `🏢 <b>${r.exchange}</b> | ${r.network}\n   DP ${r.dep}  WD ${r.wd}\n`;
+    if (!grouped[r.exchange]) grouped[r.exchange] = [];
+    grouped[r.exchange].push(`   ${r.network} | DP ${r.dep}  WD ${r.wd}`);
   });
-  return msg.trim();
+
+  // Send header
+  await sendMessage(chatId,
+    `🔍 <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : " — All Exchanges"}\n🕙 Last sync: ${lastSync}`
+  );
+
+  // Send one message per exchange
+  const entries = Object.entries(grouped);
+  for (let i = 0; i < entries.length; i++) {
+    const [exch, lines] = entries[i];
+    const isLast = i === entries.length - 1;
+    await sendMessage(chatId,
+      `🏢 <b>${exch}</b>\n${lines.join("\n")}`,
+      isLast ? { reply_markup: backKeyboard() } : {}
+    );
+  }
 }
 
 async function sendAllOpen(chatId, exchange) {
@@ -288,7 +314,7 @@ async function handleUpdate(update) {
       const filter   = parts[1];
       const token    = parts[2];
       const exchange = decodeURIComponent(parts.slice(3).join("_"));
-      return sendMessage(chatId, buildTokenResult(token, exchange, filter), { reply_markup: backKeyboard() });
+      return sendTokenResult(chatId, token, exchange, filter);
     }
     return;
   }
