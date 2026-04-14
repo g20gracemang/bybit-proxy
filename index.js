@@ -1,7 +1,8 @@
-// ─── SEXTA-TRACKER PROXY + BOT v5.0 ──────────────────────────
+// ─── SEXTA-TRACKER PROXY + BOT v5.1 ──────────────────────────
 // Exchanges : Bybit · Binance · Coinbase · Kraken
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
+// Fix       : Token results & All Open split per exchange + chunking
 // ─────────────────────────────────────────────────────────────
 const https  = require("https");
 const http   = require("http");
@@ -78,7 +79,10 @@ function tgRequest(method, payload) {
 }
 
 function sendMessage(chatId, text, extra = {}) {
-  return tgRequest("sendMessage", { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true, ...extra });
+  return tgRequest("sendMessage", {
+    chat_id: chatId, text, parse_mode: "HTML",
+    disable_web_page_preview: true, ...extra
+  });
 }
 
 function answerCallback(callbackQueryId) {
@@ -124,9 +128,33 @@ function backKeyboard() {
   return { inline_keyboard: [[{ text: "🔙 Back to Menu", callback_data: "menu_back" }]] };
 }
 
-// ── BOT RESPONSE BUILDERS ─────────────────────────────────────
+// ── SAFE SEND — chunks a single exchange block if too long ────
+async function safeSendExchange(chatId, exch, lines, addBackButton) {
+  const LIMIT = 3800;
+  let chunk   = `🏢 <b>${exch}</b>\n`;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line   = lines[i] + "\n";
+    const isLast = i === lines.length - 1;
+
+    if ((chunk + line).length > LIMIT) {
+      await sendMessage(chatId, chunk.trim());
+      chunk = `🏢 <b>${exch} (cont.)</b>\n`;
+    }
+    chunk += line;
+
+    if (isLast) {
+      await sendMessage(chatId, chunk.trim(),
+        addBackButton ? { reply_markup: backKeyboard() } : {}
+      );
+    }
+  }
+}
+
+// ── HEALTH SCORES ─────────────────────────────────────────────
 function buildHealthScores() {
-  if (dpwdData.length === 0) return "⚠️ No data available yet. Please wait for the next sync.";
+  if (dpwdData.length === 0)
+    return "⚠️ No data available yet. Please wait for the next sync.";
   const exchData = {};
   EXCHANGES.forEach(e => exchData[e] = { total: 0, healthy: 0 });
   dpwdData.forEach(r => {
@@ -147,8 +175,10 @@ function buildHealthScores() {
   return msg;
 }
 
+// ── SUSPENSIONS ───────────────────────────────────────────────
 function buildSuspensions(exchange) {
-  if (dpwdData.length === 0) return "⚠️ No data available yet. Please wait for the next sync.";
+  if (dpwdData.length === 0)
+    return "⚠️ No data available yet. Please wait for the next sync.";
   const rows = dpwdData.filter(r =>
     (exchange === "ALL" || r.exchange === exchange) &&
     (r.dep === "❌" || r.wd === "❌")
@@ -160,7 +190,8 @@ function buildSuspensions(exchange) {
   const grouped = {};
   rows.forEach(r => {
     if (!grouped[r.exchange]) grouped[r.exchange] = [];
-    const label = r.dep === "❌" && r.wd === "❌" ? "DP & WD ❌" : r.dep === "❌" ? "DP ❌" : "WD ❌";
+    const label = r.dep === "❌" && r.wd === "❌" ? "DP & WD ❌"
+                : r.dep === "❌" ? "DP ❌" : "WD ❌";
     grouped[r.exchange].push(`• ${r.symbol} (${r.network}) | ${label}`);
   });
   let msg = `🚨 <b>SUSPENSIONS${exchange !== "ALL" ? " — " + exchange : ""}</b>\n🕙 Last sync: ${lastSync}\n\n`;
@@ -170,9 +201,12 @@ function buildSuspensions(exchange) {
   return msg.trim();
 }
 
+// ── TOKEN RESULT — one message per exchange + chunking ────────
 async function sendTokenResult(chatId, token, exchange, filter) {
   if (dpwdData.length === 0) {
-    return sendMessage(chatId, "⚠️ No data available yet. Please wait for the next sync.", { reply_markup: backKeyboard() });
+    return sendMessage(chatId,
+      `⚠️ No data loaded yet.\n🕙 Last sync: ${lastSync || "never"}\n\nPlease wait for the next sync or run manually from Apps Script.`,
+      { reply_markup: backKeyboard() });
   }
   let rows = dpwdData.filter(r =>
     r.symbol === token.toUpperCase() &&
@@ -193,55 +227,62 @@ async function sendTokenResult(chatId, token, exchange, filter) {
       { reply_markup: backKeyboard() });
   }
 
-  // Group by exchange to avoid message length limits
+  // Group by exchange
   const grouped = {};
   rows.forEach(r => {
     if (!grouped[r.exchange]) grouped[r.exchange] = [];
     grouped[r.exchange].push(`   ${r.network} | DP ${r.dep}  WD ${r.wd}`);
   });
 
-  // Send header
+  // Header
   await sendMessage(chatId,
     `🔍 <b>${token.toUpperCase()}</b>${exchange !== "ALL" ? " on " + exchange : " — All Exchanges"}\n🕙 Last sync: ${lastSync}`
   );
 
-  // Send one message per exchange
+  // One message per exchange with chunking
   const entries = Object.entries(grouped);
   for (let i = 0; i < entries.length; i++) {
     const [exch, lines] = entries[i];
-    const isLast = i === entries.length - 1;
-    await sendMessage(chatId,
-      `🏢 <b>${exch}</b>\n${lines.join("\n")}`,
-      isLast ? { reply_markup: backKeyboard() } : {}
-    );
+    await safeSendExchange(chatId, exch, lines, i === entries.length - 1);
   }
 }
 
+// ── ALL OPEN TOKENS — one message per exchange + chunking ─────
 async function sendAllOpen(chatId, exchange) {
   if (dpwdData.length === 0) {
-    return sendMessage(chatId, "⚠️ No data available yet. Please wait for the next sync.", { reply_markup: backKeyboard() });
+    return sendMessage(chatId,
+      "⚠️ No data available yet. Please wait for the next sync.",
+      { reply_markup: backKeyboard() });
   }
   const rows = dpwdData.filter(r =>
     (exchange === "ALL" || r.exchange === exchange) &&
     r.dep === "✅" && r.wd === "✅"
   );
   if (rows.length === 0) {
-    return sendMessage(chatId, `❌ No open tokens found${exchange !== "ALL" ? " on " + exchange : ""}.`, { reply_markup: backKeyboard() });
+    return sendMessage(chatId,
+      `❌ No open tokens found${exchange !== "ALL" ? " on " + exchange : ""}.`,
+      { reply_markup: backKeyboard() });
   }
   const grouped = {};
   rows.forEach(r => {
     if (!grouped[r.exchange]) grouped[r.exchange] = [];
     grouped[r.exchange].push(`• ${r.symbol} (${r.network})`);
   });
-  await sendMessage(chatId, `✅ <b>ALL OPEN TOKENS${exchange !== "ALL" ? " — " + exchange : ""}</b>\n🕙 Last sync: ${lastSync}`);
+
+  // Header
+  await sendMessage(chatId,
+    `✅ <b>ALL OPEN TOKENS${exchange !== "ALL" ? " — " + exchange : ""}</b>\n🕙 Last sync: ${lastSync}`
+  );
+
+  // One message per exchange with chunking
   const entries = Object.entries(grouped);
   for (let i = 0; i < entries.length; i++) {
     const [exch, lines] = entries[i];
-    const isLast = i === entries.length - 1;
-    await sendMessage(chatId, `🏢 <b>${exch}</b>\n${lines.join("\n")}`, isLast ? { reply_markup: backKeyboard() } : {});
+    await safeSendExchange(chatId, exch, lines, i === entries.length - 1);
   }
 }
 
+// ── HELP TEXT ─────────────────────────────────────────────────
 const HELP_TEXT = `❓ <b>SEXTA-TRACKER BOT GUIDE</b>
 
 <b>How to search:</b>
@@ -266,6 +307,8 @@ Type any token symbol directly (e.g. <code>SOL</code>, <code>BTC</code>) and the
 
 // ── HANDLE TELEGRAM UPDATE ────────────────────────────────────
 async function handleUpdate(update) {
+
+  // ── Callback query (button press) ──────────────────────────
   if (update.callback_query) {
     const cb     = update.callback_query;
     const chatId = cb.message.chat.id;
@@ -274,22 +317,26 @@ async function handleUpdate(update) {
 
     if (data === "menu_back" || data === "menu_start") {
       userState[chatId] = {};
-      return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
+      return sendMessage(chatId, "👋 Hello, what would you like to do?",
+        { reply_markup: mainMenuKeyboard() });
     }
     if (data === "menu_search") {
       userState[chatId] = { step: "awaiting_token" };
-      return sendMessage(chatId, "🔍 Please type the token symbol:\n<i>e.g. SOL, BTC, ETH</i>", { reply_markup: backKeyboard() });
+      return sendMessage(chatId, "🔍 Please type the token symbol:\n<i>e.g. SOL, BTC, ETH</i>",
+        { reply_markup: backKeyboard() });
     }
     if (data === "menu_health") {
       return sendMessage(chatId, buildHealthScores(), { reply_markup: backKeyboard() });
     }
     if (data === "menu_suspend") {
       userState[chatId] = { step: "suspensions" };
-      return sendMessage(chatId, "🚨 Choose an exchange:", { reply_markup: exchangeKeyboard("suspend") });
+      return sendMessage(chatId, "🚨 Choose an exchange:",
+        { reply_markup: exchangeKeyboard("suspend") });
     }
     if (data === "menu_open") {
       userState[chatId] = { step: "open" };
-      return sendMessage(chatId, "✅ Choose an exchange:", { reply_markup: exchangeKeyboard("open") });
+      return sendMessage(chatId, "✅ Choose an exchange:",
+        { reply_markup: exchangeKeyboard("open") });
     }
     if (data === "menu_help") {
       return sendMessage(chatId, HELP_TEXT, { reply_markup: backKeyboard() });
@@ -305,8 +352,11 @@ async function handleUpdate(update) {
     if (data.startsWith("token_")) {
       const exchange = decodeURIComponent(data.replace("token_", ""));
       const token    = (userState[chatId] && userState[chatId].token) || "";
-      if (!token) return sendMessage(chatId, "⚠️ Session expired. Please search again.", { reply_markup: mainMenuKeyboard() });
-      return sendMessage(chatId, `🔍 <b>${token}</b> on <b>${exchange === "ALL" ? "All Exchanges" : exchange}</b>\nFilter results:`,
+      if (!token) return sendMessage(chatId,
+        "⚠️ Session expired. Please search again.",
+        { reply_markup: mainMenuKeyboard() });
+      return sendMessage(chatId,
+        `🔍 <b>${token}</b> on <b>${exchange === "ALL" ? "All Exchanges" : exchange}</b>\nFilter results:`,
         { reply_markup: filterKeyboard(token, exchange) });
     }
     if (data.startsWith("filter_")) {
@@ -319,27 +369,39 @@ async function handleUpdate(update) {
     return;
   }
 
+  // ── Text message ────────────────────────────────────────────
   if (update.message && update.message.text) {
     const chatId = update.message.chat.id;
     const text   = update.message.text.trim();
     const lower  = text.toLowerCase();
     const state  = userState[chatId] || {};
 
+    // Greetings / start
     if (lower === "/start" || lower === "hi" || lower === "hello" || lower === "hey") {
       userState[chatId] = {};
-      return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
+      return sendMessage(chatId, "👋 Hello, what would you like to do?",
+        { reply_markup: mainMenuKeyboard() });
     }
+
+    // Awaiting token after Search Token button
     if (state.step === "awaiting_token") {
       const token  = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
-      if (!token) return sendMessage(chatId, "⚠️ Please enter a valid token symbol.", { reply_markup: backKeyboard() });
+      if (!token) return sendMessage(chatId,
+        "⚠️ Please enter a valid token symbol.",
+        { reply_markup: backKeyboard() });
       const exists = dpwdData.some(r => r.symbol === token);
       if (!exists) return sendMessage(chatId,
-        `❌ <b>${token}</b> not found in tracked tokens.\n\nMake sure it is added to your Tickers sheet.`,
+        `❌ <b>${token}</b> not found in tracked tokens.\n\n` +
+        `📋 Data has <b>${dpwdData.length}</b> rows loaded.\n` +
+        `🕙 Last sync: ${lastSync || "never"}\n\n` +
+        `If data shows 0 rows, please run a manual sync from Apps Script.`,
         { reply_markup: backKeyboard() });
       userState[chatId] = { step: "awaiting_exchange", token };
       return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`,
         { reply_markup: exchangeKeyboard("token") });
     }
+
+    // Direct token input — skip menu
     const token = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (token.length >= 2 && token.length <= 10) {
       const exists = dpwdData.some(r => r.symbol === token);
@@ -347,10 +409,17 @@ async function handleUpdate(update) {
         userState[chatId] = { step: "awaiting_exchange", token };
         return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`,
           { reply_markup: exchangeKeyboard("token") });
+      } else if (dpwdData.length === 0) {
+        return sendMessage(chatId,
+          `⚠️ No data loaded yet.\n🕙 Last sync: ${lastSync || "never"}\n\nPlease wait for the next sync or run manually from Apps Script.`,
+          { reply_markup: backKeyboard() });
       }
     }
+
+    // Fallback — show main menu
     userState[chatId] = {};
-    return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
+    return sendMessage(chatId, "👋 Hello, what would you like to do?",
+      { reply_markup: mainMenuKeyboard() });
   }
 }
 
@@ -363,9 +432,12 @@ const server = http.createServer((req, res) => {
     const recvWindow = "5000";
     const paramStr   = ts + BYBIT_KEY + recvWindow;
     const signature  = crypto.createHmac("sha256", BYBIT_SECRET).update(paramStr).digest("hex");
-    const options = {
+    const options    = {
       hostname: "api.bybit.com", path: "/v5/asset/coin/query-info", method: "GET",
-      headers: { "X-BAPI-API-KEY": BYBIT_KEY, "X-BAPI-TIMESTAMP": ts, "X-BAPI-SIGN": signature, "X-BAPI-RECV-WINDOW": recvWindow, "Accept": "application/json" }
+      headers: {
+        "X-BAPI-API-KEY": BYBIT_KEY, "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-SIGN": signature, "X-BAPI-RECV-WINDOW": recvWindow, "Accept": "application/json"
+      }
     };
     const proxy = https.request(options, bybitRes => {
       let data = "";
@@ -383,7 +455,8 @@ const server = http.createServer((req, res) => {
     const qs  = "timestamp=" + ts;
     const sig = crypto.createHmac("sha256", BINANCE_SECRET).update(qs).digest("hex");
     const options = {
-      hostname: "api.binance.com", path: `/sapi/v1/capital/config/getall?${qs}&signature=${sig}`, method: "GET",
+      hostname: "api.binance.com",
+      path: `/sapi/v1/capital/config/getall?${qs}&signature=${sig}`, method: "GET",
       headers: { "X-MBX-APIKEY": BINANCE_KEY, "Accept": "application/json" }
     };
     const proxy = https.request(options, binRes => {
@@ -461,7 +534,11 @@ const server = http.createServer((req, res) => {
     const sig    = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
     const opts   = {
       hostname: "api.exchange.coinbase.com", path: "/currencies", method: "GET",
-      headers: { "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig, "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE, "User-Agent": "sexta-tracker/1.0", "Accept": "application/json" }
+      headers: {
+        "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig,
+        "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+        "User-Agent": "sexta-tracker/1.0", "Accept": "application/json"
+      }
     };
     const proxy = https.request(opts, cbRes => {
       let data = "";
@@ -470,10 +547,13 @@ const server = http.createServer((req, res) => {
         try {
           const currencies = JSON.parse(data);
           const result = currencies.map(c => {
-            const id      = c.id.toUpperCase();
             const details = c.details || {};
-            const network = inferNetwork(details.crypto_transaction_link) || id;
-            return { id: c.id, status: c.status, network, deposit_enabled: c.status === "online", withdraw_enabled: c.status === "online" };
+            const network = inferNetwork(details.crypto_transaction_link) || c.id.toUpperCase();
+            return {
+              id: c.id, status: c.status, network,
+              deposit_enabled:  c.status === "online",
+              withdraw_enabled: c.status === "online"
+            };
           });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(result));
@@ -491,9 +571,12 @@ const server = http.createServer((req, res) => {
     req.on("data", chunk => body += chunk);
     req.on("end", () => {
       const tickers = body.split(",").map(t => t.trim()).filter(Boolean);
-      if (!tickers.length) { res.writeHead(400); res.end(JSON.stringify({ error: "No tickers provided" })); return; }
+      if (!tickers.length) {
+        res.writeHead(400); res.end(JSON.stringify({ error: "No tickers provided" })); return;
+      }
       const pubReq = https.request({
-        hostname: "api.kraken.com", path: "/0/public/Assets", method: "GET", headers: { "Accept": "application/json" }
+        hostname: "api.kraken.com", path: "/0/public/Assets",
+        method: "GET", headers: { "Accept": "application/json" }
       }, pubRes => {
         let pubData = "";
         pubRes.on("data", c => pubData += c);
@@ -511,15 +594,22 @@ const server = http.createServer((req, res) => {
           const promises = tickers.map((coin, i) =>
             new Promise(resolve => setTimeout(() => {
               const krakenId = altToId[coin.toUpperCase()] || coin;
-              const wdOk     = wdStatus[coin.toUpperCase()] !== undefined ? wdStatus[coin.toUpperCase()] : true;
+              const wdOk     = wdStatus[coin.toUpperCase()] !== undefined
+                ? wdStatus[coin.toUpperCase()] : true;
               krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
                 .then(depData => {
                   const depMethods = (depData.result || []).map(m => m.method);
                   if (depMethods.length === 0) {
-                    resolve([{ coin, network: "ALL NETWORKS", depositEnable: wdStatus[coin.toUpperCase()] !== undefined ? wdStatus[coin.toUpperCase()] : true, withdrawEnable: wdOk }]);
+                    resolve([{
+                      coin, network: "ALL NETWORKS",
+                      depositEnable:  wdStatus[coin.toUpperCase()] !== undefined ? wdStatus[coin.toUpperCase()] : true,
+                      withdrawEnable: wdOk
+                    }]);
                     return;
                   }
-                  resolve(depMethods.map(network => ({ coin, network, depositEnable: true, withdrawEnable: wdOk })));
+                  resolve(depMethods.map(network => ({
+                    coin, network, depositEnable: true, withdrawEnable: wdOk
+                  })));
                 })
                 .catch(() => resolve([]));
             }, i * 150))
@@ -527,7 +617,9 @@ const server = http.createServer((req, res) => {
           Promise.all(promises).then(arrays => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(arrays.flat()));
-          }).catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+          }).catch(e => {
+            res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
+          });
         });
       });
       pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
@@ -546,7 +638,11 @@ const server = http.createServer((req, res) => {
     const sig    = crypto.createHmac("sha256", secret).update(ts + "GET/currencies").digest("base64");
     const opts   = {
       hostname: "api.exchange.coinbase.com", path: "/currencies", method: "GET",
-      headers: { "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig, "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE, "User-Agent": "sexta-tracker/1.0", "Accept": "application/json" }
+      headers: {
+        "CB-ACCESS-KEY": COINBASE_KEY, "CB-ACCESS-SIGN": sig,
+        "CB-ACCESS-TIMESTAMP": ts, "CB-ACCESS-PASSPHRASE": COINBASE_PASSPHRASE,
+        "User-Agent": "sexta-tracker/1.0", "Accept": "application/json"
+      }
     };
     const r = https.request(opts, resp => {
       let d = "";
@@ -554,8 +650,9 @@ const server = http.createServer((req, res) => {
       resp.on("end", () => {
         try {
           const all    = JSON.parse(d);
-          const sample = all.filter(c => filter.length === 0 || filter.includes(c.id.toUpperCase()))
-                            .map(c => ({ id: c.id, status: c.status, details: c.details }));
+          const sample = all
+            .filter(c => filter.length === 0 || filter.includes(c.id.toUpperCase()))
+            .map(c => ({ id: c.id, status: c.status, details: c.details }));
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(sample, null, 2));
         } catch(e) { res.writeHead(500); res.end(d); }
