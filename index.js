@@ -594,7 +594,7 @@ const server = http.createServer((req, res) => {
                   results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
                   console.log(`⚠️ Kraken ${coin}: no networks found`);
                 }
-                setTimeout(() => processNext(index + 1), 500);
+                setTimeout(() => processNext(index + 1), 300);
               })
               .catch(e => {
                 console.log(`❌ Kraken ${coin} error: ${e.message}`);
