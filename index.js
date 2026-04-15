@@ -1,8 +1,8 @@
-// ─── SEXTA-TRACKER PROXY + BOT v5.3 ──────────────────────────
+// ─── SEXTA-TRACKER PROXY + BOT v5.2 ──────────────────────────
 // Exchanges : Bybit · Binance · Coinbase · Kraken
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
-// Fix       : Kraken rate limit — 300ms delay, 10s recovery
+// Fix       : Kraken sequential processing + rate limit recovery
 // ─────────────────────────────────────────────────────────────
 const https  = require("https");
 const http   = require("http");
@@ -548,7 +548,8 @@ const server = http.createServer((req, res) => {
             });
           } catch(e) { console.log("❌ Kraken assets error:", e.message); }
 
-          const results   = [];
+          // Process sequentially to avoid rate limits
+          const results = [];
           let rateLimited = false;
 
           const processNext = (index) => {
@@ -567,10 +568,9 @@ const server = http.createServer((req, res) => {
                              : wdStatus[krakenId.toUpperCase()] !== undefined ? wdStatus[krakenId.toUpperCase()]
                              : true;
 
-            // If rate limited, skip with delay — don't waste API calls
             if (rateLimited) {
               results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
-              setTimeout(() => processNext(index + 1), 300);
+              setTimeout(() => processNext(index + 1), 100);
               return;
             }
 
@@ -583,8 +583,7 @@ const server = http.createServer((req, res) => {
                   console.log(`⚠️ Kraken rate limited at ${coin} (${index}/${tickers.length})`);
                   rateLimited = true;
                   results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
-                  // Wait 10 seconds then resume
-                  setTimeout(() => { rateLimited = false; processNext(index + 1); }, 10000);
+                  setTimeout(() => { rateLimited = false; processNext(index + 1); }, 5000);
                   return;
                 }
 
@@ -595,13 +594,12 @@ const server = http.createServer((req, res) => {
                   results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
                   console.log(`⚠️ Kraken ${coin}: no networks found`);
                 }
-                // 300ms between each coin
                 setTimeout(() => processNext(index + 1), 300);
               })
               .catch(e => {
                 console.log(`❌ Kraken ${coin} error: ${e.message}`);
                 results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
-                setTimeout(() => processNext(index + 1), 300);
+                setTimeout(() => processNext(index + 1), 500);
               });
           };
 
