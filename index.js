@@ -1,9 +1,22 @@
-// ─── SEXTA-TRACKER PROXY + BOT v5.4 ──────────────────────────
+// ─── SEXTA-TRACKER PROXY + BOT v5.5 ──────────────────────────
 // Exchanges : Bybit · Binance · Coinbase · Kraken
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
-// Fix v5.3  : Kraken rate limit — 1100ms delay, 20s recovery, per-token retry
-// Fix v5.4  : MAX_RETRIES=0 — in-request retry caused Apps Script 30s timeout
+// v5.4      : MAX_RETRIES=0, BATCH_SIZE=20 (timeout fixes)
+// v5.5      : Whitelist access control
+//             OTC tickers merge into same dpwdData — no bot changes needed
+//
+// NEW ENV VAR:
+//   ADMIN_CHAT_ID — your personal Telegram chat ID (number).
+//                   Setting this activates whitelist enforcement.
+//                   Without it, all users are allowed (backward compatible).
+//
+// ADMIN COMMANDS (only from ADMIN_CHAT_ID):
+//   /adduser {chatId} {label}  — add to in-memory whitelist
+//   /removeuser {chatId}       — remove from in-memory whitelist
+//   /listusers                 — show current whitelist
+//   Note: in-memory changes reset on Render restart / next data push.
+//         Add to the Whitelist sheet for permanent access.
 // ─────────────────────────────────────────────────────────────
 const https  = require("https");
 const http   = require("http");
@@ -19,11 +32,22 @@ const COINBASE_PASSPHRASE = process.env.COINBASE_PASSPHRASE;
 const KRAKEN_KEY          = process.env.KRAKEN_KEY;
 const KRAKEN_SECRET       = process.env.KRAKEN_SECRET;
 const TELEGRAM_BOT_TOKEN  = process.env.TELEGRAM_BOT_TOKEN;
+const ADMIN_CHAT_ID       = process.env.ADMIN_CHAT_ID ? parseInt(process.env.ADMIN_CHAT_ID) : null;
 
 // ── IN-MEMORY DATA STORE ───────────────────────────────────────
-let dpwdData    = [];
+let dpwdData    = [];         // all tickers (regular + OTC merged by Apps Script)
 let lastSync    = "";
+let whitelist   = new Set();  // populated from Apps Script Whitelist sheet every 10 min
 const userState = {};
+
+// ── WHITELIST GUARD ────────────────────────────────────────────
+// If ADMIN_CHAT_ID is not set → everyone allowed (backward compatible).
+// Once set → only ADMIN + whitelisted chat IDs can use the bot.
+function isAllowed(chatId) {
+  if (!ADMIN_CHAT_ID) return true;
+  if (chatId === ADMIN_CHAT_ID) return true;
+  return whitelist.has(chatId);
+}
 
 // ── KRAKEN SIGNATURE ───────────────────────────────────────────
 function krakenSign(path, nonce, postData) {
@@ -199,7 +223,7 @@ function buildSuspensions(exchange) {
   return msg.trim();
 }
 
-// ── TOKEN RESULT — one message per exchange + chunking ────────
+// ── TOKEN RESULT ──────────────────────────────────────────────
 async function sendTokenResult(chatId, token, exchange, filter) {
   if (dpwdData.length === 0) {
     return sendMessage(chatId,
@@ -212,7 +236,7 @@ async function sendTokenResult(chatId, token, exchange, filter) {
   );
   if (rows.length === 0) {
     return sendMessage(chatId,
-      `❌ <b>${token.toUpperCase()}</b> not found${exchange !== "ALL" ? " on " + exchange : ""}.\n\nMake sure the token is in your Tickers sheet.`,
+      `❌ <b>${token.toUpperCase()}</b> not found${exchange !== "ALL" ? " on " + exchange : ""}.\n\nMake sure the token is in your Tickers or OTCTickers sheet.`,
       { reply_markup: backKeyboard() });
   }
   if (filter === "open")      rows = rows.filter(r => r.dep === "✅" && r.wd === "✅");
@@ -239,7 +263,7 @@ async function sendTokenResult(chatId, token, exchange, filter) {
   }
 }
 
-// ── ALL OPEN TOKENS — one message per exchange + chunking ─────
+// ── ALL OPEN TOKENS ───────────────────────────────────────────
 async function sendAllOpen(chatId, exchange) {
   if (dpwdData.length === 0) {
     return sendMessage(chatId,
@@ -291,14 +315,34 @@ Type any token symbol directly (e.g. <code>SOL</code>, <code>BTC</code>) and the
 <b>Tips:</b>
 • You can skip the menu and just type a token name anytime
 • Say <b>hi</b> or <b>hello</b> to show the main menu
-• Data refreshes every 10 minutes`;
+• Data refreshes every 10 minutes
+• Both Regular and OTC tickers are searchable here`;
 
 // ── HANDLE TELEGRAM UPDATE ────────────────────────────────────
 async function handleUpdate(update) {
+  // Resolve chatId first so we can whitelist-check before anything else
+  const chatId = update.callback_query
+    ? update.callback_query.message.chat.id
+    : update.message
+    ? update.message.chat.id
+    : null;
+
+  if (!chatId) return;
+
+  // ── Whitelist gate ──
+  // Non-whitelisted users get their Chat ID so admin can add them to the sheet
+  if (!isAllowed(chatId)) {
+    return sendMessage(chatId,
+      `🔒 <b>Access Restricted</b>\n\nThis bot is for authorised users only.\n\n` +
+      `Your Chat ID: <code>${chatId}</code>\n\n` +
+      `Send this to your admin to request access.`
+    );
+  }
+
+  // ── Callback query ────────────────────────────────────────
   if (update.callback_query) {
-    const cb     = update.callback_query;
-    const chatId = cb.message.chat.id;
-    const data   = cb.data;
+    const cb   = update.callback_query;
+    const data = cb.data;
     await answerCallback(cb.id);
 
     if (data === "menu_back" || data === "menu_start") {
@@ -319,10 +363,12 @@ async function handleUpdate(update) {
       return sendMessage(chatId, "✅ Choose an exchange:", { reply_markup: exchangeKeyboard("open") });
     }
     if (data === "menu_help") return sendMessage(chatId, HELP_TEXT, { reply_markup: backKeyboard() });
+
     if (data.startsWith("suspend_")) {
       return sendMessage(chatId, buildSuspensions(decodeURIComponent(data.replace("suspend_", ""))), { reply_markup: backKeyboard() });
     }
-    if (data.startsWith("open_"))   return sendAllOpen(chatId, decodeURIComponent(data.replace("open_", "")));
+    if (data.startsWith("open_")) return sendAllOpen(chatId, decodeURIComponent(data.replace("open_", "")));
+
     if (data.startsWith("token_")) {
       const exchange = decodeURIComponent(data.replace("token_", ""));
       const token    = (userState[chatId] && userState[chatId].token) || "";
@@ -341,16 +387,49 @@ async function handleUpdate(update) {
     return;
   }
 
+  // ── Text message ──────────────────────────────────────────
   if (update.message && update.message.text) {
-    const chatId = update.message.chat.id;
-    const text   = update.message.text.trim();
-    const lower  = text.toLowerCase();
-    const state  = userState[chatId] || {};
+    const text  = update.message.text.trim();
+    const lower = text.toLowerCase();
+    const state = userState[chatId] || {};
 
+    // Greeting
     if (lower === "/start" || lower === "hi" || lower === "hello" || lower === "hey") {
       userState[chatId] = {};
       return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
     }
+
+    // ── Admin commands ──
+    if (chatId === ADMIN_CHAT_ID) {
+      if (lower.startsWith("/adduser ")) {
+        const parts = text.split(" ");
+        const id    = parseInt(parts[1]);
+        const label = parts.slice(2).join(" ") || "unknown";
+        if (id) {
+          whitelist.add(id);
+          return sendMessage(chatId,
+            `✅ Chat ID <code>${id}</code> (${label}) added.\n` +
+            `⚠️ In-memory only — add to the <b>Whitelist</b> sheet for persistence across restarts.`);
+        }
+        return sendMessage(chatId, "⚠️ Usage: /adduser {chatId} {label}");
+      }
+      if (lower.startsWith("/removeuser ")) {
+        const id = parseInt(text.split(" ")[1]);
+        if (id && whitelist.has(id)) {
+          whitelist.delete(id);
+          return sendMessage(chatId,
+            `✅ Chat ID <code>${id}</code> removed.\n` +
+            `⚠️ Also remove from the <b>Whitelist</b> sheet for permanent removal.`);
+        }
+        return sendMessage(chatId, "⚠️ Chat ID not found in whitelist.");
+      }
+      if (lower === "/listusers") {
+        const list = whitelist.size > 0 ? [...whitelist].join("\n") : "none";
+        return sendMessage(chatId, `👥 <b>Whitelist (${whitelist.size} users)</b>\n\n${list}`);
+      }
+    }
+
+    // Token input while in awaiting_token step
     if (state.step === "awaiting_token") {
       const token  = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
       if (!token) return sendMessage(chatId, "⚠️ Please enter a valid token symbol.", { reply_markup: backKeyboard() });
@@ -359,11 +438,13 @@ async function handleUpdate(update) {
         `❌ <b>${token}</b> not found in tracked tokens.\n\n` +
         `📋 Data has <b>${dpwdData.length}</b> rows loaded.\n` +
         `🕙 Last sync: ${lastSync || "never"}\n\n` +
-        `If data shows 0 rows, please run a manual sync from Apps Script.`,
+        `Make sure the token is in your Tickers or OTCTickers sheet.`,
         { reply_markup: backKeyboard() });
       userState[chatId] = { step: "awaiting_exchange", token };
       return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`, { reply_markup: exchangeKeyboard("token") });
     }
+
+    // Quick-type: user types a token directly without going through the menu
     const token = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (token.length >= 2 && token.length <= 10) {
       const exists = dpwdData.some(r => r.symbol === token);
@@ -372,10 +453,11 @@ async function handleUpdate(update) {
         return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`, { reply_markup: exchangeKeyboard("token") });
       } else if (dpwdData.length === 0) {
         return sendMessage(chatId,
-          `⚠️ No data loaded yet.\n🕙 Last sync: ${lastSync || "never"}\n\nPlease wait for the next sync or run manually from Apps Script.`,
+          `⚠️ No data loaded yet.\n🕙 Last sync: ${lastSync || "never"}\n\nPlease wait for the next sync.`,
           { reply_markup: backKeyboard() });
       }
     }
+
     userState[chatId] = {};
     return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
   }
@@ -512,7 +594,7 @@ const server = http.createServer((req, res) => {
   }
 
   // ── KRAKEN ───────────────────────────────────────────────────
-  // v5.4: 1100ms delay between tickers, no in-request retry (avoids 30s timeout)
+  // v5.4: 1100ms delay, no in-request retry (avoids 30s UrlFetchApp timeout)
   if (req.url === "/kraken") {
     console.log("📩 Kraken request received");
     let body = "";
@@ -524,16 +606,8 @@ const server = http.createServer((req, res) => {
         res.writeHead(400); res.end(JSON.stringify({ error: "No tickers provided" })); return;
       }
 
-      const KRAKEN_TICKER_MAP = {
-        "BTC":  "XBT",
-        "DOGE": "XDG",
-      };
-
-      // Rate limit settings
-      // No in-request retry: retrying inside Render would add 20s+ and blow past Apps Script's
-      // 30s UrlFetchApp timeout. The 1100ms delay prevents rate limiting; if it still happens
-      // we fallback immediately and the 20-min throttle ensures a clean retry next cycle.
-      const DELAY_MS = 1100;  // 1.1s between requests — safe under Kraken's 1 req/sec limit
+      const KRAKEN_TICKER_MAP = { "BTC": "XBT", "DOGE": "XDG" };
+      const DELAY_MS = 1100;
 
       const pubReq = https.request({
         hostname: "api.kraken.com", path: "/0/public/Assets",
@@ -558,25 +632,23 @@ const server = http.createServer((req, res) => {
 
           const results = [];
 
-          // Core fetch — no in-request retry (MAX_RETRIES=0) to stay within 30s timeout
           const fetchDepositMethods = (coin, krakenId) => {
             return krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
               .then(depData => {
                 const methods = depData.result || [];
                 const errors  = depData.error  || [];
                 if (errors.some(e => e.includes("Rate limit"))) {
-                  console.log(`⚠️ Kraken rate limited on ${coin} — using fallback (will retry next 20-min cycle)`);
+                  console.log(`⚠️ Kraken rate limited on ${coin} — fallback (retry next cycle)`);
                   return { fallback: true };
                 }
                 return { methods };
               })
               .catch(e => {
-                console.log(`❌ Kraken ${coin} request error: ${e.message}`);
+                console.log(`❌ Kraken ${coin} error: ${e.message}`);
                 return { error: true };
               });
           };
 
-          // Sequential processor — one ticker at a time
           const processNext = (index) => {
             if (index >= tickers.length) {
               console.log(`✅ Kraken final result: ${results.length} rows`);
@@ -584,7 +656,6 @@ const server = http.createServer((req, res) => {
               res.end(JSON.stringify(results));
               return;
             }
-
             const coin       = tickers[index];
             const mappedCoin = KRAKEN_TICKER_MAP[coin] || coin;
             const krakenId   = altToId[mappedCoin] || altToId[coin] || mappedCoin;
@@ -604,8 +675,6 @@ const server = http.createServer((req, res) => {
                 const reason = outcome.fallback ? "rate limit fallback" : outcome.error ? "request error" : "no methods found";
                 console.log(`⚠️ Kraken ${coin} (${index + 1}/${tickers.length}): ${reason}`);
               }
-
-              // Always wait DELAY_MS before moving to next ticker
               setTimeout(() => processNext(index + 1), DELAY_MS);
             });
           };
@@ -650,6 +719,7 @@ const server = http.createServer((req, res) => {
   }
 
   // ── DATA PUSH (from Apps Script) ─────────────────────────────
+  // Accepts: { lastSync, data, whitelist }
   if (req.url === "/data" && req.method === "POST") {
     let body = "";
     req.on("data", chunk => body += chunk);
@@ -659,8 +729,13 @@ const server = http.createServer((req, res) => {
         if (payload.data && Array.isArray(payload.data)) {
           dpwdData = payload.data;
           lastSync = payload.lastSync || "";
+          // Update whitelist if provided (replaces current in-memory set)
+          if (payload.whitelist && Array.isArray(payload.whitelist)) {
+            whitelist = new Set(payload.whitelist.map(id => parseInt(id)).filter(Boolean));
+          }
+          console.log(`✅ Data push: ${dpwdData.length} rows, ${whitelist.size} whitelisted users`);
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: true, rows: dpwdData.length }));
+          res.end(JSON.stringify({ ok: true, rows: dpwdData.length, whitelistSize: whitelist.size }));
         } else {
           res.writeHead(400); res.end(JSON.stringify({ error: "Invalid payload" }));
         }
@@ -696,4 +771,4 @@ const server = http.createServer((req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, "0.0.0.0", () => console.log("Proxy running on port " + PORT));
+server.listen(PORT, "0.0.0.0", () => console.log(`Proxy running on port ${PORT}`));
