@@ -1,8 +1,9 @@
-// ─── SEXTA-TRACKER PROXY + BOT v5.2 ──────────────────────────
+// ─── SEXTA-TRACKER PROXY + BOT v5.4 ──────────────────────────
 // Exchanges : Bybit · Binance · Coinbase · Kraken
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
-// Fix       : Kraken sequential processing + rate limit recovery
+// Fix v5.3  : Kraken rate limit — 1100ms delay, 20s recovery, per-token retry
+// Fix v5.4  : MAX_RETRIES=0 — in-request retry caused Apps Script 30s timeout
 // ─────────────────────────────────────────────────────────────
 const https  = require("https");
 const http   = require("http");
@@ -511,6 +512,7 @@ const server = http.createServer((req, res) => {
   }
 
   // ── KRAKEN ───────────────────────────────────────────────────
+  // v5.4: 1100ms delay between tickers, no in-request retry (avoids 30s timeout)
   if (req.url === "/kraken") {
     console.log("📩 Kraken request received");
     let body = "";
@@ -526,6 +528,12 @@ const server = http.createServer((req, res) => {
         "BTC":  "XBT",
         "DOGE": "XDG",
       };
+
+      // Rate limit settings
+      // No in-request retry: retrying inside Render would add 20s+ and blow past Apps Script's
+      // 30s UrlFetchApp timeout. The 1100ms delay prevents rate limiting; if it still happens
+      // we fallback immediately and the 20-min throttle ensures a clean retry next cycle.
+      const DELAY_MS = 1100;  // 1.1s between requests — safe under Kraken's 1 req/sec limit
 
       const pubReq = https.request({
         hostname: "api.kraken.com", path: "/0/public/Assets",
@@ -548,10 +556,27 @@ const server = http.createServer((req, res) => {
             });
           } catch(e) { console.log("❌ Kraken assets error:", e.message); }
 
-          // Process sequentially to avoid rate limits
           const results = [];
-          let rateLimited = false;
 
+          // Core fetch — no in-request retry (MAX_RETRIES=0) to stay within 30s timeout
+          const fetchDepositMethods = (coin, krakenId) => {
+            return krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
+              .then(depData => {
+                const methods = depData.result || [];
+                const errors  = depData.error  || [];
+                if (errors.some(e => e.includes("Rate limit"))) {
+                  console.log(`⚠️ Kraken rate limited on ${coin} — using fallback (will retry next 20-min cycle)`);
+                  return { fallback: true };
+                }
+                return { methods };
+              })
+              .catch(e => {
+                console.log(`❌ Kraken ${coin} request error: ${e.message}`);
+                return { error: true };
+              });
+          };
+
+          // Sequential processor — one ticker at a time
           const processNext = (index) => {
             if (index >= tickers.length) {
               console.log(`✅ Kraken final result: ${results.length} rows`);
@@ -563,44 +588,26 @@ const server = http.createServer((req, res) => {
             const coin       = tickers[index];
             const mappedCoin = KRAKEN_TICKER_MAP[coin] || coin;
             const krakenId   = altToId[mappedCoin] || altToId[coin] || mappedCoin;
-            const wdOk       = wdStatus[mappedCoin] !== undefined ? wdStatus[mappedCoin]
-                             : wdStatus[coin] !== undefined ? wdStatus[coin]
+            const wdOk       = wdStatus[mappedCoin]            !== undefined ? wdStatus[mappedCoin]
+                             : wdStatus[coin]                  !== undefined ? wdStatus[coin]
                              : wdStatus[krakenId.toUpperCase()] !== undefined ? wdStatus[krakenId.toUpperCase()]
                              : true;
 
-            if (rateLimited) {
-              results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
-              setTimeout(() => processNext(index + 1), 100);
-              return;
-            }
-
-            krakenPost("/0/private/DepositMethods", "asset=" + krakenId)
-              .then(depData => {
-                const methods = depData.result || [];
-                const errors  = depData.error || [];
-
-                if (errors.some(e => e.includes("Rate limit"))) {
-                  console.log(`⚠️ Kraken rate limited at ${coin} (${index}/${tickers.length})`);
-                  rateLimited = true;
-                  results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
-                  setTimeout(() => { rateLimited = false; processNext(index + 1); }, 5000);
-                  return;
-                }
-
-                if (methods.length > 0) {
-                  methods.forEach(m => results.push({ coin, network: m.method, depositEnable: true, withdrawEnable: wdOk }));
-                  console.log(`✅ Kraken ${coin}: ${methods.length} networks`);
-                } else {
-                  results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
-                  console.log(`⚠️ Kraken ${coin}: no networks found`);
-                }
-                setTimeout(() => processNext(index + 1), 300);
-              })
-              .catch(e => {
-                console.log(`❌ Kraken ${coin} error: ${e.message}`);
+            fetchDepositMethods(coin, krakenId).then(outcome => {
+              if (outcome.methods && outcome.methods.length > 0) {
+                outcome.methods.forEach(m =>
+                  results.push({ coin, network: m.method, depositEnable: true, withdrawEnable: wdOk })
+                );
+                console.log(`✅ Kraken ${coin} (${index + 1}/${tickers.length}): ${outcome.methods.length} networks`);
+              } else {
                 results.push({ coin, network: "ALL NETWORKS", depositEnable: wdOk, withdrawEnable: wdOk });
-                setTimeout(() => processNext(index + 1), 500);
-              });
+                const reason = outcome.fallback ? "rate limit fallback" : outcome.error ? "request error" : "no methods found";
+                console.log(`⚠️ Kraken ${coin} (${index + 1}/${tickers.length}): ${reason}`);
+              }
+
+              // Always wait DELAY_MS before moving to next ticker
+              setTimeout(() => processNext(index + 1), DELAY_MS);
+            });
           };
 
           processNext(0);
