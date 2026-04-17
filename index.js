@@ -1,15 +1,18 @@
-// ─── SEXTA-TRACKER PROXY + BOT v5.5 ──────────────────────────
-// Exchanges : Bybit · Binance · Coinbase · Kraken
+// ─── SEXTA-TRACKER PROXY + BOT v5.6 ──────────────────────────
+// Exchanges : Bybit · Binance · Coinbase · Kraken · Huobi
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
 // v5.4      : MAX_RETRIES=0, BATCH_SIZE=20 (timeout fixes)
 // v5.5      : Whitelist access control
 //             OTC tickers merge into same dpwdData — no bot changes needed
+// v5.6      : Huobi (HTX) proxy endpoint added
 //
 // NEW ENV VAR:
 //   ADMIN_CHAT_ID — your personal Telegram chat ID (number).
 //                   Setting this activates whitelist enforcement.
 //                   Without it, all users are allowed (backward compatible).
+//   HUOBI_KEY     — Huobi/HTX read-only API key
+//   HUOBI_SECRET  — Huobi/HTX secret key
 //
 // ADMIN COMMANDS (only from ADMIN_CHAT_ID):
 //   /adduser {chatId} {label}  — add to in-memory whitelist
@@ -31,6 +34,8 @@ const COINBASE_SECRET     = process.env.COINBASE_SECRET;
 const COINBASE_PASSPHRASE = process.env.COINBASE_PASSPHRASE;
 const KRAKEN_KEY          = process.env.KRAKEN_KEY;
 const KRAKEN_SECRET       = process.env.KRAKEN_SECRET;
+const HUOBI_KEY           = process.env.HUOBI_KEY;    // ← NEW v5.6
+const HUOBI_SECRET        = process.env.HUOBI_SECRET; // ← NEW v5.6
 const TELEGRAM_BOT_TOKEN  = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID       = process.env.ADMIN_CHAT_ID ? parseInt(process.env.ADMIN_CHAT_ID) : null;
 
@@ -115,7 +120,7 @@ function answerCallback(callbackQueryId) {
 }
 
 // ── KEYBOARD BUILDERS ─────────────────────────────────────────
-const EXCHANGES = ["OKX", "KuCoin", "Gate.io", "MEXC", "Bitget", "Bybit", "Binance", "Coinbase", "Kraken"];
+const EXCHANGES = ["OKX", "KuCoin", "Gate.io", "MEXC", "Bitget", "Bybit", "Binance", "Coinbase", "Kraken", "Huobi"]; // ← Huobi added v5.6
 
 function mainMenuKeyboard() {
   return {
@@ -685,6 +690,47 @@ const server = http.createServer((req, res) => {
       pubReq.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
       pubReq.end();
     });
+    return;
+  }
+
+  // ── HUOBI (HTX) ──────────────────────────────────────────────
+  // NEW v5.6
+  // Endpoint : GET https://api.huobi.pro/v2/reference/currencies
+  // Auth     : HMAC-SHA256 query-string signature per Huobi API docs
+  // Response : { code: 200, data: [ { currency, chains: [ { chain, depositStatus, withdrawStatus } ] } ] }
+  if (req.url === "/huobi") {
+    const ts      = new Date().toISOString().slice(0, 19); // "2024-01-01T00:00:00"
+    const host    = "api.huobi.pro";
+    const path    = "/v2/reference/currencies";
+    const params  = `AccessKeyId=${encodeURIComponent(HUOBI_KEY)}&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=${encodeURIComponent(ts)}`;
+    const payload = `GET\n${host}\n${path}\n${params}`;
+    const sig     = crypto.createHmac("sha256", HUOBI_SECRET).update(payload).digest("base64");
+    const fullPath = `${path}?${params}&Signature=${encodeURIComponent(sig)}`;
+
+    const options = {
+      hostname: host, path: fullPath, method: "GET",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" }
+    };
+    const proxy = https.request(options, huobiRes => {
+      let data = "";
+      huobiRes.on("data", chunk => data += chunk);
+      huobiRes.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.code !== 200 || !Array.isArray(parsed.data)) {
+            console.log("❌ Huobi unexpected response:", data.slice(0, 200));
+            res.writeHead(502); res.end(JSON.stringify({ error: "Huobi API error", detail: parsed }));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(parsed.data));
+        } catch(e) {
+          res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+    });
+    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    proxy.end();
     return;
   }
 
