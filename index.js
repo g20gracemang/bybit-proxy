@@ -1,11 +1,11 @@
-// ─── SEXTA-TRACKER PROXY + BOT v5.6 ──────────────────────────
-// Exchanges : Bybit · Binance · Coinbase · Kraken · Huobi
+// ─── SEXTA-TRACKER PROXY + BOT v5.7 ──────────────────────────
+// Exchanges : Bybit · Binance · Coinbase · Kraken · Huobi · Bitvavo
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
 // v5.4      : MAX_RETRIES=0, BATCH_SIZE=20 (timeout fixes)
 // v5.5      : Whitelist access control
-//             OTC tickers merge into same dpwdData — no bot changes needed
 // v5.6      : Huobi (HTX) proxy endpoint added
+// v5.7      : Bitvavo proxy endpoint added
 //
 // NEW ENV VAR:
 //   ADMIN_CHAT_ID — your personal Telegram chat ID (number).
@@ -36,6 +36,8 @@ const KRAKEN_KEY          = process.env.KRAKEN_KEY;
 const KRAKEN_SECRET       = process.env.KRAKEN_SECRET;
 const HUOBI_KEY           = process.env.HUOBI_KEY;    // ← NEW v5.6
 const HUOBI_SECRET        = process.env.HUOBI_SECRET; // ← NEW v5.6
+const BITVAVO_KEY         = process.env.BITVAVO_KEY;    // ← NEW v5.7
+const BITVAVO_SECRET      = process.env.BITVAVO_SECRET; // ← NEW v5.7
 const TELEGRAM_BOT_TOKEN  = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID       = process.env.ADMIN_CHAT_ID ? parseInt(process.env.ADMIN_CHAT_ID) : null;
 
@@ -120,7 +122,7 @@ function answerCallback(callbackQueryId) {
 }
 
 // ── KEYBOARD BUILDERS ─────────────────────────────────────────
-const EXCHANGES = ["OKX", "KuCoin", "Gate.io", "MEXC", "Bitget", "Bybit", "Binance", "Coinbase", "Kraken", "Huobi"]; // ← Huobi added v5.6
+const EXCHANGES = ["OKX", "KuCoin", "Gate.io", "MEXC", "Bitget", "Bybit", "Binance", "Coinbase", "Kraken", "Huobi", "Bitvavo"];
 
 function mainMenuKeyboard() {
   return {
@@ -724,6 +726,49 @@ const server = http.createServer((req, res) => {
           }
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(parsed.data));
+        } catch(e) {
+          res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+    });
+    proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+    proxy.end();
+    return;
+  }
+
+  // ── BITVAVO ───────────────────────────────────────────────────
+  // NEW v5.7
+  // Endpoint : GET https://api.bitvavo.com/v2/assets
+  // Auth     : HMAC-SHA256, signature = timestamp + "GET" + "/v2/assets" + ""
+  // Response : [{ symbol, depositStatus, withdrawalStatus, networks: [...] }]
+  if (req.url === "/bitvavo") {
+    const ts  = Date.now().toString();
+    const sig = crypto.createHmac("sha256", BITVAVO_SECRET)
+                  .update(ts + "GET" + "/v2/assets" + "")
+                  .digest("hex");
+    const options = {
+      hostname: "api.bitvavo.com", path: "/v2/assets", method: "GET",
+      headers: {
+        "Bitvavo-Access-Key":       BITVAVO_KEY,
+        "Bitvavo-Access-Signature": sig,
+        "Bitvavo-Access-Timestamp": ts,
+        "Bitvavo-Access-Window":    "10000",
+        "Accept":                   "application/json"
+      }
+    };
+    const proxy = https.request(options, bvRes => {
+      let data = "";
+      bvRes.on("data", chunk => data += chunk);
+      bvRes.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (!Array.isArray(parsed)) {
+            console.log("❌ Bitvavo unexpected response:", data.slice(0, 200));
+            res.writeHead(502); res.end(JSON.stringify({ error: "Bitvavo API error", detail: parsed }));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(parsed));
         } catch(e) {
           res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
         }
