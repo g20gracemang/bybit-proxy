@@ -1,4 +1,4 @@
-// ─── SEXTA-TRACKER PROXY + BOT v5.7 ──────────────────────────
+// ─── SEXTA-TRACKER PROXY + BOT v5.8 ──────────────────────────
 // Exchanges : Bybit · Binance · Coinbase · Kraken · Huobi · Bitvavo
 // Bot       : Telegram webhook with inline keyboard
 // Data      : Receives DP/WD push from Apps Script every 10 min
@@ -6,13 +6,19 @@
 // v5.5      : Whitelist access control
 // v5.6      : Huobi (HTX) proxy endpoint added
 // v5.7      : Bitvavo proxy endpoint added
+// v5.8      : Bybit debug endpoint added (/bybit-debug)
 //
-// NEW ENV VAR:
+// ENV VARS (set in Render):
+//   BYBIT_KEY / BYBIT_SECRET
+//   BINANCE_KEY / BINANCE_SECRET
+//   COINBASE_KEY / COINBASE_SECRET / COINBASE_PASSPHRASE
+//   KRAKEN_KEY / KRAKEN_SECRET
+//   HUOBI_KEY / HUOBI_SECRET
+//   BITVAVO_KEY / BITVAVO_SECRET
+//   TELEGRAM_BOT_TOKEN
 //   ADMIN_CHAT_ID — your personal Telegram chat ID (number).
 //                   Setting this activates whitelist enforcement.
 //                   Without it, all users are allowed (backward compatible).
-//   HUOBI_KEY     — Huobi/HTX read-only API key
-//   HUOBI_SECRET  — Huobi/HTX secret key
 //
 // ADMIN COMMANDS (only from ADMIN_CHAT_ID):
 //   /adduser {chatId} {label}  — add to in-memory whitelist
@@ -34,22 +40,20 @@ const COINBASE_SECRET     = process.env.COINBASE_SECRET;
 const COINBASE_PASSPHRASE = process.env.COINBASE_PASSPHRASE;
 const KRAKEN_KEY          = process.env.KRAKEN_KEY;
 const KRAKEN_SECRET       = process.env.KRAKEN_SECRET;
-const HUOBI_KEY           = process.env.HUOBI_KEY;    // ← NEW v5.6
-const HUOBI_SECRET        = process.env.HUOBI_SECRET; // ← NEW v5.6
-const BITVAVO_KEY         = process.env.BITVAVO_KEY;    // ← NEW v5.7
-const BITVAVO_SECRET      = process.env.BITVAVO_SECRET; // ← NEW v5.7
+const HUOBI_KEY           = process.env.HUOBI_KEY;
+const HUOBI_SECRET        = process.env.HUOBI_SECRET;
+const BITVAVO_KEY         = process.env.BITVAVO_KEY;
+const BITVAVO_SECRET      = process.env.BITVAVO_SECRET;
 const TELEGRAM_BOT_TOKEN  = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID       = process.env.ADMIN_CHAT_ID ? parseInt(process.env.ADMIN_CHAT_ID) : null;
 
 // ── IN-MEMORY DATA STORE ───────────────────────────────────────
-let dpwdData    = [];         // all tickers (regular + OTC merged by Apps Script)
+let dpwdData    = [];
 let lastSync    = "";
-let whitelist   = new Set();  // populated from Apps Script Whitelist sheet every 10 min
+let whitelist   = new Set();
 const userState = {};
 
 // ── WHITELIST GUARD ────────────────────────────────────────────
-// If ADMIN_CHAT_ID is not set → everyone allowed (backward compatible).
-// Once set → only ADMIN + whitelisted chat IDs can use the bot.
 function isAllowed(chatId) {
   if (!ADMIN_CHAT_ID) return true;
   if (chatId === ADMIN_CHAT_ID) return true;
@@ -160,7 +164,7 @@ function backKeyboard() {
   return { inline_keyboard: [[{ text: "🔙 Back to Menu", callback_data: "menu_back" }]] };
 }
 
-// ── SAFE SEND — chunks a single exchange block if too long ────
+// ── SAFE SEND ─────────────────────────────────────────────────
 async function safeSendExchange(chatId, exch, lines, addBackButton) {
   const LIMIT = 3800;
   let chunk   = `🏢 <b>${exch}</b>\n`;
@@ -327,7 +331,6 @@ Type any token symbol directly (e.g. <code>SOL</code>, <code>BTC</code>) and the
 
 // ── HANDLE TELEGRAM UPDATE ────────────────────────────────────
 async function handleUpdate(update) {
-  // Resolve chatId first so we can whitelist-check before anything else
   const chatId = update.callback_query
     ? update.callback_query.message.chat.id
     : update.message
@@ -336,8 +339,6 @@ async function handleUpdate(update) {
 
   if (!chatId) return;
 
-  // ── Whitelist gate ──
-  // Non-whitelisted users get their Chat ID so admin can add them to the sheet
   if (!isAllowed(chatId)) {
     return sendMessage(chatId,
       `🔒 <b>Access Restricted</b>\n\nThis bot is for authorised users only.\n\n` +
@@ -346,7 +347,6 @@ async function handleUpdate(update) {
     );
   }
 
-  // ── Callback query ────────────────────────────────────────
   if (update.callback_query) {
     const cb   = update.callback_query;
     const data = cb.data;
@@ -394,19 +394,16 @@ async function handleUpdate(update) {
     return;
   }
 
-  // ── Text message ──────────────────────────────────────────
   if (update.message && update.message.text) {
     const text  = update.message.text.trim();
     const lower = text.toLowerCase();
     const state = userState[chatId] || {};
 
-    // Greeting
     if (lower === "/start" || lower === "hi" || lower === "hello" || lower === "hey") {
       userState[chatId] = {};
       return sendMessage(chatId, "👋 Hello, what would you like to do?", { reply_markup: mainMenuKeyboard() });
     }
 
-    // ── Admin commands ──
     if (chatId === ADMIN_CHAT_ID) {
       if (lower.startsWith("/adduser ")) {
         const parts = text.split(" ");
@@ -436,7 +433,6 @@ async function handleUpdate(update) {
       }
     }
 
-    // Token input while in awaiting_token step
     if (state.step === "awaiting_token") {
       const token  = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
       if (!token) return sendMessage(chatId, "⚠️ Please enter a valid token symbol.", { reply_markup: backKeyboard() });
@@ -451,7 +447,6 @@ async function handleUpdate(update) {
       return sendMessage(chatId, `🔍 <b>${token}</b> found! Choose an exchange:`, { reply_markup: exchangeKeyboard("token") });
     }
 
-    // Quick-type: user types a token directly without going through the menu
     const token = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (token.length >= 2 && token.length <= 10) {
       const exists = dpwdData.some(r => r.symbol === token);
@@ -490,6 +485,20 @@ const server = http.createServer((req, res) => {
     });
     proxy.on("error", e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
     proxy.end();
+    return;
+  }
+
+  // ── BYBIT DEBUG ───────────────────────────────────────────────
+  // Safe — shows key length and first 4 chars only, never the full key/secret
+  if (req.url === "/bybit-debug") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      bybit_key_set:    !!BYBIT_KEY,
+      bybit_secret_set: !!BYBIT_SECRET,
+      bybit_key_length: BYBIT_KEY    ? BYBIT_KEY.length    : 0,
+      bybit_key_prefix: BYBIT_KEY    ? BYBIT_KEY.substring(0, 4)    : "none",
+      bybit_secret_length: BYBIT_SECRET ? BYBIT_SECRET.length : 0
+    }));
     return;
   }
 
@@ -601,7 +610,6 @@ const server = http.createServer((req, res) => {
   }
 
   // ── KRAKEN ───────────────────────────────────────────────────
-  // v5.4: 1100ms delay, no in-request retry (avoids 30s UrlFetchApp timeout)
   if (req.url === "/kraken") {
     console.log("📩 Kraken request received");
     let body = "";
@@ -666,8 +674,8 @@ const server = http.createServer((req, res) => {
             const coin       = tickers[index];
             const mappedCoin = KRAKEN_TICKER_MAP[coin] || coin;
             const krakenId   = altToId[mappedCoin] || altToId[coin] || mappedCoin;
-            const wdOk       = wdStatus[mappedCoin]            !== undefined ? wdStatus[mappedCoin]
-                             : wdStatus[coin]                  !== undefined ? wdStatus[coin]
+            const wdOk       = wdStatus[mappedCoin]             !== undefined ? wdStatus[mappedCoin]
+                             : wdStatus[coin]                   !== undefined ? wdStatus[coin]
                              : wdStatus[krakenId.toUpperCase()] !== undefined ? wdStatus[krakenId.toUpperCase()]
                              : true;
 
@@ -696,12 +704,8 @@ const server = http.createServer((req, res) => {
   }
 
   // ── HUOBI (HTX) ──────────────────────────────────────────────
-  // NEW v5.6
-  // Endpoint : GET https://api.huobi.pro/v2/reference/currencies
-  // Auth     : HMAC-SHA256 query-string signature per Huobi API docs
-  // Response : { code: 200, data: [ { currency, chains: [ { chain, depositStatus, withdrawStatus } ] } ] }
   if (req.url === "/huobi") {
-    const ts      = new Date().toISOString().slice(0, 19); // "2024-01-01T00:00:00"
+    const ts      = new Date().toISOString().slice(0, 19);
     const host    = "api.huobi.pro";
     const path    = "/v2/reference/currencies";
     const params  = `AccessKeyId=${encodeURIComponent(HUOBI_KEY)}&SignatureMethod=HmacSHA256&SignatureVersion=2&Timestamp=${encodeURIComponent(ts)}`;
@@ -737,10 +741,6 @@ const server = http.createServer((req, res) => {
   }
 
   // ── BITVAVO ───────────────────────────────────────────────────
-  // NEW v5.7
-  // Endpoint : GET https://api.bitvavo.com/v2/assets
-  // Auth     : HMAC-SHA256, signature = timestamp + "GET" + "/v2/assets" + ""
-  // Response : [{ symbol, depositStatus, withdrawalStatus, networks: [...] }]
   if (req.url === "/bitvavo") {
     const ts  = Date.now().toString();
     const sig = crypto.createHmac("sha256", BITVAVO_SECRET)
@@ -810,7 +810,6 @@ const server = http.createServer((req, res) => {
   }
 
   // ── DATA PUSH (from Apps Script) ─────────────────────────────
-  // Accepts: { lastSync, data, whitelist }
   if (req.url === "/data" && req.method === "POST") {
     let body = "";
     req.on("data", chunk => body += chunk);
@@ -820,7 +819,6 @@ const server = http.createServer((req, res) => {
         if (payload.data && Array.isArray(payload.data)) {
           dpwdData = payload.data;
           lastSync = payload.lastSync || "";
-          // Update whitelist if provided (replaces current in-memory set)
           if (payload.whitelist && Array.isArray(payload.whitelist)) {
             whitelist = new Set(payload.whitelist.map(id => parseInt(id)).filter(Boolean));
           }
